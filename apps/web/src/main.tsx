@@ -4,6 +4,8 @@ import type { Task, Project, Run, Event } from "../../../packages/domain/index";
 import "./style.css";
 import { ResourceManager } from "./ResourceManager";
 import { PlanEditor } from "./PlanEditor";
+import { PlanningBoard } from "./PlanningBoard";
+import { DiagnosisBoard } from "./DiagnosisBoard";
 
 const labels: Record<string, string> = {
   inbox: "收件箱",
@@ -203,22 +205,28 @@ function App() {
           </span>
         </div>
         <div className="nav-title">WORKSPACE</div>
-        {["工作台", "执行台", "优化中心", "项目与仓库", "能力与知识"].map(
-          (item, index) => (
-            <button
-              className={`nav ${page === item ? "active" : ""}`}
-              key={item}
-              onClick={() => {
-                setPage(item);
-                setPrepared(undefined);
-              }}
-            >
-              <span>{["▦", "▷", "↗", "▱", "◈"][index]}</span>
-              {item}
-              {item === "执行台" && active > 0 && <b>{active}</b>}
-            </button>
-          ),
-        )}
+        {[
+          "工作台",
+          "执行台",
+          "优化中心",
+          "项目与仓库",
+          "能力与知识",
+          "目标与计划",
+          "故障诊断",
+        ].map((item, index) => (
+          <button
+            className={`nav ${page === item ? "active" : ""}`}
+            key={item}
+            onClick={() => {
+              setPage(item);
+              setPrepared(undefined);
+            }}
+          >
+            <span>{["▦", "▷", "↗", "▱", "◈", "☷", "⌕"][index]}</span>
+            {item}
+            {item === "执行台" && active > 0 && <b>{active}</b>}
+          </button>
+        ))}
         <div className="sidebar-bottom">
           <i /> 本机服务已连接<small>LOCAL FIRST · v0.1 开发中</small>
         </div>
@@ -248,7 +256,13 @@ function App() {
                     ? "查看运行过程、成果与需要你处理的事项。"
                     : page === "优化中心"
                       ? "让改进建立在真实的任务记录上。"
-                      : "连接代码仓库，建立项目上下文。"}
+                      : page === "目标与计划"
+                        ? "组织目标、子任务与依赖，回顾实际验收进展。"
+                        : page === "故障诊断"
+                          ? "围绕可追溯证据建立假设、验证和结论。"
+                          : page === "能力与知识"
+                            ? "管理版本、来源与运行方法。"
+                            : "连接代码仓库，建立项目上下文。"}
               </p>
             </div>
             {page === "工作台" && (
@@ -652,6 +666,18 @@ function App() {
             </>
           )}
           {page === "能力与知识" && <ResourceManager api={api} act={act} />}
+          {page === "目标与计划" && (
+            <PlanningBoard
+              tasks={tasks}
+              projects={projects}
+              api={api}
+              act={act}
+              refresh={refresh}
+            />
+          )}
+          {page === "故障诊断" && (
+            <DiagnosisBoard tasks={tasks} api={api} act={act} />
+          )}
           {currentRun?.status === "paused" &&
             currentRun.runtime !== "manual" &&
             page === "执行台" && (
@@ -796,7 +822,7 @@ function App() {
                   <select name="type" defaultValue="manual">
                     <option value="manual">人工执行</option>
                     <option value="development">Codex 需求开发</option>
-                    <option value="diagnosis">Agent 故障诊断（接入中）</option>
+                    <option value="diagnosis">Codex 只读故障诊断</option>
                   </select>
                 </label>
                 <label>

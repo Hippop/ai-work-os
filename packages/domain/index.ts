@@ -15,6 +15,11 @@ export const TaskInput = z.object({
   skillVersionIds: z.array(z.string().uuid()).max(20).default([]),
   knowledgeVersionIds: z.array(z.string().uuid()).max(30).default([]),
   workflowVersionId: z.string().uuid().nullable().default(null),
+  parentId: z.string().uuid().nullable().default(null),
+  goalId: z.string().uuid().nullable().default(null),
+  dependsOn: z.array(z.string().uuid()).max(100).default([]),
+  plannedFor: z.iso.date().nullable().default(null),
+  dueAt: z.iso.date().nullable().default(null),
 });
 export type TaskData = z.infer<typeof TaskInput>;
 export type Task = TaskData & {

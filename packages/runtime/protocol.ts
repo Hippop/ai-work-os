@@ -13,6 +13,12 @@ export type Job = {
   plan?: import("../resources/index.js").PlanNode[];
   context?: unknown;
   completed?: Record<string, unknown>;
+  taskType?: string;
+  diagnosis?: {
+    evidence: import("../diagnosis/index.js").Evidence[];
+    hypotheses: unknown[];
+    digest: string;
+  };
 };
 export type WorkerMessage =
   | { type: "heartbeat"; epoch: string }
@@ -31,5 +37,6 @@ export type WorkerMessage =
       subjectDigest: string;
       artifacts: string[];
       artifactDigests: Record<string, string>;
+      diagnosisReport?: import("../diagnosis/index.js").DiagnosisReport;
     }
   | { type: "failure"; epoch: string; message: string };

@@ -8,6 +8,7 @@ import { WorkService } from "../packages/workflow/service.js";
 import { Supervisor } from "../packages/runtime/supervisor.js";
 import { probeCodex } from "../packages/runtime/adapter.js";
 import type { Run } from "../packages/domain/index.js";
+import { DiagnosisService } from "../packages/diagnosis/index.js";
 
 const runtime = probeCodex();
 if (!runtime.available) throw new Error("Codex CLI not available");
@@ -48,16 +49,30 @@ const project = service.createProject({
     ],
   },
 });
+const diagnostic = process.argv.includes("--diagnosis");
 const task = service.createTask({
   title: "Codex execution smoke",
-  objective:
-    "Change answer.txt to contain exactly 42. This is a minimal fixture; no dependencies, commits or network are needed.",
+  type: diagnostic ? "diagnosis" : "development",
+  objective: diagnostic
+    ? "Investigate why answer.txt is 0 though 42 is expected. No experiment has been executed; keep all files unchanged. Report missing evidence and next experiments. No dependencies or network are needed."
+    : "Change answer.txt to contain exactly 42. This is a minimal fixture; no dependencies, commits or network are needed.",
   projectId: project.id,
   maxMinutes: 5,
   acceptanceCriteria: [
-    "answer.txt contains 42 and deterministic verification passes",
+    diagnostic
+      ? "Evidence-based diagnosis states unknowns, does not invent confirmed cause, and changes no code"
+      : "answer.txt contains 42 and deterministic verification passes",
   ],
 });
+if (diagnostic)
+  new DiagnosisService(store).addEvidence(task.id, {
+    title: "Initial file state",
+    source: "answer.txt at baseline commit",
+    observedAt: new Date().toISOString(),
+    kind: "observation",
+    content:
+      "The file contains 0; expected value is 42. No causal experiment or change history is supplied.",
+  });
 const run = service.start(
   task.id,
   service.prepare(task.id).preparationDigest,

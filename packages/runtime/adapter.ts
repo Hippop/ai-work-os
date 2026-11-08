@@ -3,6 +3,7 @@ import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type { Job } from "./protocol.js";
+import { DiagnosisResult } from "../diagnosis/index.js";
 
 export const Result = z.object({
   summary: z.string().min(1),
@@ -110,18 +111,38 @@ export async function runAgent(
 ) {
   const schemaPath = join(job.outputDir, "result.schema.json"),
     resultPath = join(job.outputDir, `${key}.json`);
+  const diagnostic = job.taskType === "diagnosis" && operation === "conclude";
+  function strictSchema(value: any): any {
+    if (Array.isArray(value)) return value.map(strictSchema);
+    if (!value || typeof value !== "object") return value;
+    const result = Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "default")
+        .map(([key, v]) => [key, strictSchema(v)]),
+    );
+    if (result.properties) {
+      result.required = Object.keys(result.properties);
+      result.additionalProperties = false;
+    }
+    return result;
+  }
+  const schema = diagnostic
+    ? strictSchema(z.toJSONSchema(DiagnosisResult))
+    : null;
   writeFileSync(
     schemaPath,
-    JSON.stringify({
-      type: "object",
-      additionalProperties: false,
-      required: ["summary", "evidence", "risks"],
-      properties: {
-        summary: { type: "string" },
-        evidence: { type: "array", items: { type: "string" } },
-        risks: { type: "array", items: { type: "string" } },
+    JSON.stringify(
+      schema ?? {
+        type: "object",
+        additionalProperties: false,
+        required: ["summary", "evidence", "risks"],
+        properties: {
+          summary: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
+          risks: { type: "array", items: { type: "string" } },
+        },
       },
-    }),
+    ),
   );
   const args = [
     ...job.commandPrefix,
@@ -150,5 +171,6 @@ export async function runAgent(
     throw new Error(
       `Agent ${key} exited with ${result.code}; see execution logs`,
     );
-  return Result.parse(JSON.parse(readFileSync(resultPath, "utf8")));
+  const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
+  return diagnostic ? DiagnosisResult.parse(parsed) : Result.parse(parsed);
 }

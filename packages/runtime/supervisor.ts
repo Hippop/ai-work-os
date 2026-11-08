@@ -7,6 +7,7 @@ import { WorkService } from "../workflow/service.js";
 import { type Run, type Task, type Project } from "../domain/index.js";
 import { createWorkspace, workspaceDigest } from "../workspace/index.js";
 import type { Job, WorkerMessage } from "./protocol.js";
+import { validateDiagnosis } from "../diagnosis/index.js";
 
 type Active = {
   outputDir: string;
@@ -66,11 +67,24 @@ export class Supervisor {
       }
     }
     if (this.active.size >= 2) return;
-    const row = this.store.db
+    const pending = this.store.db
       .prepare(
-        "SELECT id,run_id FROM outbox WHERE state='pending' ORDER BY created_at LIMIT 1",
+        "SELECT id,run_id FROM outbox WHERE state='pending' ORDER BY created_at",
       )
-      .get() as { id: string; run_id: string } | undefined;
+      .all() as { id: string; run_id: string }[];
+    const eligible = pending.filter((row) => {
+      const run = this.service.required<Run>("run", row.run_id);
+      if (!["queued", "preparing"].includes(run.status)) return true;
+      return ((run.manifest.task as Task).dependsOn ?? []).every(
+        (id) => this.store.get<Task>("task", id)?.status === "done",
+      );
+    });
+    const rank = (row: { run_id: string }) => {
+      const task = this.service.required<Run>("run", row.run_id).manifest
+        .task as Task;
+      return task.priority === "high" ? 0 : task.priority === "low" ? 2 : 1;
+    };
+    const row = eligible.sort((a, b) => rank(a) - rank(b))[0];
     if (!row) return;
     const run = this.service.required<Run>("run", row.run_id);
     if (run.status !== "queued" && run.status !== "preparing") {
@@ -154,6 +168,8 @@ export class Supervisor {
         command: this.command,
         commandPrefix: this.commandPrefix,
         objective: task.objective,
+        taskType: task.type,
+        diagnosis: run.manifest.diagnosis as Job["diagnosis"],
         criteria: task.acceptanceCriteria,
         testCommand: project.testCommand!,
         deadline,
@@ -317,6 +333,12 @@ export class Supervisor {
                   .update(readFileSync(join(active.outputDir, name)))
                   .digest("hex") === active.result!.artifactDigests[name],
             );
+          if ((run.manifest.task as Task).type === "diagnosis")
+            validateDiagnosis(
+              active.result.diagnosisReport,
+              (run.manifest.diagnosis as NonNullable<Job["diagnosis"]>)
+                .evidence,
+            );
         } catch {
           evidenceValid = false;
         }
@@ -336,6 +358,20 @@ export class Supervisor {
             createdAt: new Date().toISOString(),
           };
           this.store.put("delivery", delivery);
+          if (active.result.diagnosisReport)
+            this.store.put("diagnosis_report", {
+              ...active.result.diagnosisReport,
+              id: randomUUID(),
+              taskId: run.taskId,
+              runId: id,
+              inputDigest: (
+                run.manifest.diagnosis as NonNullable<Job["diagnosis"]>
+              ).digest,
+              evidenceSnapshot: (
+                run.manifest.diagnosis as NonNullable<Job["diagnosis"]>
+              ).evidence,
+              createdAt: new Date().toISOString(),
+            });
           this.store.event(id, "delivery.submitted", delivery);
           this.service.transition(id, "succeeded");
           const task = this.service.required<Task>("task", run.taskId);

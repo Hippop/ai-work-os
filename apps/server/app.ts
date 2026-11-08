@@ -5,6 +5,8 @@ import { timingSafeEqual, createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
+import { PlanningService } from "../../packages/planning/index.js";
+import { DiagnosisService } from "../../packages/diagnosis/index.js";
 import {
   ResourceService,
   defaultPlan,
@@ -23,6 +25,8 @@ export function createApp(
 ) {
   const app = express();
   const resources = new ResourceService(store);
+  const planning = new PlanningService(store),
+    diagnosis = new DiagnosisService(store);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "128kb" }));
   app.use("/api", (req, res, next) => {
@@ -58,6 +62,45 @@ export function createApp(
     res.json({ status: "ok", schemaVersion: 1 }),
   );
   app.get("/api/v1/tasks", (_req, res) => res.json(store.list("task")));
+  app.get("/api/v1/goals", (_req, res) => res.json(planning.goals()));
+  app.post("/api/v1/goals", (req, res) =>
+    res.status(201).json(planning.createGoal(req.body)),
+  );
+  app.get("/api/v1/planning/summary", (req, res) =>
+    res.json(
+      planning.summary(
+        z.string().parse(req.query.from),
+        z.string().parse(req.query.to),
+      ),
+    ),
+  );
+  app.post("/api/v1/tasks/:id/plan", (req, res) => {
+    const body = z
+      .object({
+        revision: z.number().int().positive(),
+        changes: z.record(z.string(), z.unknown()),
+      })
+      .parse(req.body);
+    res.json(service.updateTask(req.params.id, body.revision, body.changes));
+  });
+  app.get("/api/v1/tasks/:id/diagnosis", (req, res) =>
+    res.json({
+      ...diagnosis.snapshot(req.params.id),
+      reports: store
+        .list<{ taskId: string }>("diagnosis_report")
+        .filter((r) => r.taskId === req.params.id),
+    }),
+  );
+  app.post("/api/v1/tasks/:id/diagnosis/evidence", (req, res) =>
+    res.status(201).json(diagnosis.addEvidence(req.params.id, req.body)),
+  );
+  app.post("/api/v1/tasks/:id/diagnosis/hypotheses", (req, res) =>
+    res.status(201).json(diagnosis.addHypothesis(req.params.id, req.body)),
+  );
+  app.post('/api/v1/tasks/:id/diagnosis/hypotheses/:hypothesisId',(req,res)=>{const body=z.object({revision:z.number().int().positive(),changes:z.record(z.string(),z.unknown())}).parse(req.body);res.json(diagnosis.updateHypothesis(req.params.id,req.params.hypothesisId,body.revision,body.changes));});
+  app.post("/api/v1/tasks/:id/diagnosis/reports", (req, res) =>
+    res.status(201).json(diagnosis.report(req.params.id, req.body)),
+  );
   app.get("/api/v1/resources", (_req, res) =>
     res.json(
       store.list<{ id: string }>("resource").map((resource) => ({
@@ -226,7 +269,9 @@ export function createApp(
       ).length,
       runs: runs.length,
       failedRuns: runs.filter((r) => r.status === "failed").length,
-      observations: ["当前分析覆盖人工任务；Agent 用量与优化评估尚未接入。"],
+      observations: [
+        "统计覆盖人工与Agent运行；模型用量与优化评估指标尚未接入。",
+      ],
     });
   });
   app.use("/api", (_req, res) =>

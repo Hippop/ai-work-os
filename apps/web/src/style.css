@@ -613,3 +613,19 @@ header span {
     font-size: 12px;
   }
 }
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.checkbox input {
+  display: inline-block;
+  width: auto;
+  margin: 0;
+}
+select[multiple] {
+  min-height: 90px;
+}
+details textarea {
+  font-family: monospace;
+}

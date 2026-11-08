@@ -11,6 +11,7 @@ import { type Run, type Task } from "../packages/domain/index.js";
 import request from "supertest";
 import { createApp } from "../apps/server/app.js";
 import { defaultPlan } from "../packages/resources/index.js";
+import { DiagnosisService } from "../packages/diagnosis/index.js";
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "aiwork-runtime-")),
@@ -329,6 +330,127 @@ test("manual workspace drift requires a new validated plan and old plan remains 
     previous === undefined
       ? delete process.env.AI_WORK_OS_FIXTURE_HANG
       : (process.env.AI_WORK_OS_FIXTURE_HANG = previous);
+    await f.supervisor.close();
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("diagnosis uses read-only workflow and delivers an unresolved evidence-based report without running development tests", async () => {
+  const f = setup();
+  try {
+    const project = f.store.list<any>("project")[0];
+    f.store.put("project", {
+      ...project,
+      testCommand: {
+        executable: process.execPath,
+        args: ["-e", "process.exit(99)"],
+      },
+    });
+    const task = f.service.createTask({
+      title: "Investigate answer",
+      objective: "Investigate why answer is 0",
+      type: "diagnosis",
+      projectId: project.id,
+      acceptanceCriteria: [
+        "State evidence and unknowns without changing files",
+      ],
+    });
+    new DiagnosisService(f.store).addEvidence(task.id, {
+      title: "Initial value",
+      source: "answer.txt",
+      observedAt: new Date().toISOString(),
+      kind: "observation",
+      content: "answer.txt is 0",
+    });
+    const run = f.service.start(
+      task.id,
+      f.service.prepare(task.id).preparationDigest,
+      "diagnosis",
+    );
+    await until(
+      () =>
+        ["succeeded", "failed", "reconciling"].includes(
+          f.service.required<Run>("run", run.id).status,
+        ),
+      () => f.supervisor.tick(),
+    );
+    assert.equal(
+      f.service.required<Run>("run", run.id).status,
+      "succeeded",
+      JSON.stringify(f.store.events(run.id)),
+    );
+    assert.equal(f.service.required<Run>("run", run.id).steps.length, 5);
+    assert.equal(
+      f.store.list<any>("diagnosis_report")[0].conclusion.status,
+      "unresolved",
+    );
+    assert.equal(
+      f.store.list<any>("delivery")[0].artifacts.includes("test.json"),
+      false,
+    );
+    assert.equal(
+      readFileSync(
+        join(f.store.get<any>("workspace", run.id).workspace, "answer.txt"),
+        "utf8",
+      ),
+      "0",
+    );
+  } finally {
+    await f.supervisor.close();
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("scheduler rechecks dependencies and dispatches other eligible tasks instead of blocked head", async () => {
+  const f = setup();
+  try {
+    const prerequisite = f.service.createTask({
+      title: "Prerequisite",
+      objective: "Approved prerequisite",
+      type: "manual",
+      acceptanceCriteria: ["Accepted"],
+    });
+    const pr = f.service.start(
+      prerequisite.id,
+      f.service.prepare(prerequisite.id).preparationDigest,
+      "prerequisite",
+    );
+    const pd = f.service.submit(pr.id, "Approved");
+    f.service.accept(prerequisite.id, pd.id, true, "");
+    const dependent = f.service.createTask({
+      ...f.task,
+      title: "Dependent",
+      dependsOn: [prerequisite.id],
+    });
+    const blocked = f.service.start(
+      dependent.id,
+      f.service.prepare(dependent.id).preparationDigest,
+      "dependent",
+    );
+    f.service.updateTask(prerequisite.id, 1, {
+      objective: "Reopened prerequisite",
+    });
+    const eligible = f.service.start(
+      f.task.id,
+      f.service.prepare(f.task.id).preparationDigest,
+      "eligible",
+    );
+    await until(
+      () =>
+        ["succeeded", "failed", "reconciling"].includes(
+          f.service.required<Run>("run", eligible.id).status,
+        ),
+      () => f.supervisor.tick(),
+    );
+    assert.equal(
+      f.service.required<Run>("run", eligible.id).status,
+      "succeeded",
+    );
+    assert.equal(f.service.required<Run>("run", blocked.id).status, "queued");
+    assert.equal(f.store.get("workspace", blocked.id), undefined);
+  } finally {
     await f.supervisor.close();
     f.store.close();
     rmSync(f.root, { recursive: true, force: true });

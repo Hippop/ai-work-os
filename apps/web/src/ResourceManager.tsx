@@ -42,6 +42,7 @@ export function ResourceManager({
           .split("\n")
           .map((s) => s.trim())
           .filter(Boolean),
+        taskType: data.get("taskType"),
         ...(kind === "workflow"
           ? { nodes: JSON.parse(String(data.get("nodes"))) }
           : {}),
@@ -80,6 +81,13 @@ export function ResourceManager({
           <label>
             名称
             <input name="name" required />
+          </label>
+          <label>
+            工作流任务类型（仅工作流使用）
+            <select name="taskType">
+              <option value="development">需求开发</option>
+              <option value="diagnosis">故障诊断</option>
+            </select>
           </label>
           <label>
             内容

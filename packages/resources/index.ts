@@ -18,6 +18,10 @@ export const NodeInput = z.object({
     "test",
     "review",
     "deliver",
+    "collect",
+    "hypothesize",
+    "verify",
+    "conclude",
   ]),
   title: z.string().min(1).max(200),
   dependsOn: z.array(z.string()).default([]),
@@ -29,8 +33,33 @@ export const defaultPlan: PlanNode[] = workflow.map(([key, title], i) => ({
   title,
   dependsOn: i ? [workflow[i - 1][0]] : [],
 }));
-export function validatePlan(input: unknown): PlanNode[] {
-  const nodes = z.array(NodeInput).min(6).max(30).parse(input);
+export const diagnosisPlan: PlanNode[] = [
+  "collect",
+  "hypothesize",
+  "verify",
+  "conclude",
+  "deliver",
+].map((key, i, keys) => ({
+  key,
+  operation: key as PlanNode["operation"],
+  title: [
+    "故障证据收集",
+    "建立候选假设",
+    "验证假设与反证",
+    "形成根因结论",
+    "交付诊断报告",
+  ][i],
+  dependsOn: i ? [keys[i - 1]] : [],
+}));
+export function validatePlan(
+  input: unknown,
+  taskType = "development",
+): PlanNode[] {
+  const nodes = z
+    .array(NodeInput)
+    .min(taskType === "diagnosis" ? 5 : 6)
+    .max(30)
+    .parse(input);
   const byKey = new Map(nodes.map((n) => [n.key, n]));
   if (byKey.size !== nodes.length)
     throw new DomainError("invalid_plan", "步骤名称重复", 422);
@@ -63,7 +92,17 @@ export function validatePlan(input: unknown): PlanNode[] {
   collect(deliveries[0].key);
   if (ancestors.size !== nodes.length)
     throw new DomainError("invalid_plan", "所有步骤必须连接到交付节点", 422);
-  for (const operation of ["analyze", "design", "implement", "test", "review"])
+  const required =
+    taskType === "diagnosis"
+      ? ["collect", "hypothesize", "verify", "conclude"]
+      : ["analyze", "design", "implement", "test", "review"];
+  if (ordered.some((n) => ![...required, "deliver"].includes(n.operation)))
+    throw new DomainError(
+      "invalid_plan",
+      "工作流包含当前任务类型不允许的操作",
+      422,
+    );
+  for (const operation of required)
     if (!ordered.some((n) => n.operation === operation))
       throw new DomainError(
         "invalid_plan",
@@ -71,10 +110,27 @@ export function validatePlan(input: unknown): PlanNode[] {
         422,
       );
   const operations = ordered.map((n) => n.operation);
+  if (
+    taskType === "diagnosis" &&
+    ["collect", "hypothesize", "verify", "conclude"].some(
+      (op, i, all) =>
+        i > 0 &&
+        operations.lastIndexOf(op as PlanNode["operation"]) <
+          operations.lastIndexOf(all[i - 1] as PlanNode["operation"]),
+    )
+  )
+    throw new DomainError(
+      "invalid_plan",
+      "诊断必须先收集、建立假设、验证，再形成结论",
+      422,
+    );
   const lastWrite = operations.lastIndexOf("implement"),
     lastTest = operations.lastIndexOf("test"),
     lastReview = operations.lastIndexOf("review");
-  if (lastTest < lastWrite || lastReview < lastTest)
+  if (
+    taskType !== "diagnosis" &&
+    (lastTest < lastWrite || lastReview < lastTest)
+  )
     throw new DomainError(
       "invalid_plan",
       "最终实现后必须测试，测试后必须审查",
@@ -90,6 +146,7 @@ const VersionInput = z.object({
   content: z.string().min(1).max(40000),
   sources: z.array(z.string().min(1).max(2000)).max(50).default([]),
   nodes: z.array(NodeInput).optional(),
+  taskType: z.enum(["development", "diagnosis"]).default("development"),
 });
 export type ResourceVersion = z.infer<typeof VersionInput> & {
   id: string;
@@ -104,7 +161,8 @@ export class ResourceService {
       throw new DomainError("not_found", "项目不存在", 404);
     if (data.kind === "knowledge" && !data.sources.length)
       throw new DomainError("sources_required", "知识必须标明来源", 422);
-    if (data.kind === "workflow") data.nodes = validatePlan(data.nodes);
+    if (data.kind === "workflow")
+      data.nodes = validatePlan(data.nodes, data.taskType);
     if (data.kind !== "workflow" && data.nodes)
       throw new DomainError("invalid_resource", "只有工作流可以定义步骤", 422);
     return this.store.transaction(() => {
@@ -230,17 +288,24 @@ export class ResourceService {
     knowledgeIds: string[],
     workflowId: string | null,
     projectId: string | null,
+    taskType = "development",
   ) {
     const skills = this.resolve(skillIds, "skill", projectId),
       knowledge = this.resolve(knowledgeIds, "knowledge", projectId),
       template = workflowId
         ? this.resolve([workflowId], "workflow", projectId)[0]
         : null;
+    if (template && (template.taskType ?? "development") !== taskType)
+      throw new DomainError("workflow_type", "模板与任务类型不匹配", 422);
     const result = {
       skills,
       knowledge,
       workflow: template,
-      plan: template ? validatePlan(template.nodes) : defaultPlan,
+      plan: template
+        ? validatePlan(template.nodes, taskType)
+        : taskType === "diagnosis"
+          ? diagnosisPlan
+          : defaultPlan,
     };
     if (JSON.stringify(result).length > 80000)
       throw new DomainError(

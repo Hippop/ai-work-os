@@ -11,6 +11,31 @@ if (
 )
   setInterval(() => {}, 1000);
 else {
+  if (prompt.includes("Step: conclude.")) {
+    writeFileSync(
+      result,
+      JSON.stringify({
+        summary: "Evidence is insufficient",
+        hypotheses: [
+          {
+            claim: "Insufficient evidence for a verified root cause",
+            supportingEvidence: [],
+            contradictingEvidence: [],
+            nextExperiment: "Collect controlled reproduction evidence",
+            status: "open",
+          },
+        ],
+        conclusion: {
+          status: "unresolved",
+          hypothesisIndex: null,
+          reason: "No verified causal experiment is available",
+          unknowns: ["Need verified experiment"],
+        },
+      }),
+    );
+    console.log(JSON.stringify({ type: "turn.completed" }));
+    process.exit(0);
+  }
   if (prompt.includes("Step: implement."))
     writeFileSync(join(workspace, "answer.txt"), "42");
   writeFileSync(

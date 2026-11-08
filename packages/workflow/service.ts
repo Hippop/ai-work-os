@@ -4,6 +4,8 @@ import { realpathSync } from "node:fs";
 import { Store } from "../persistence/index.js";
 import { ResourceService, validatePlan } from "../resources/index.js";
 import { workspaceDigest } from "../workspace/index.js";
+import { validateTaskRelations } from "../planning/index.js";
+import { DiagnosisService } from "../diagnosis/index.js";
 import {
   TaskInput,
   ProjectInput,
@@ -42,8 +44,16 @@ export class WorkService {
       createdAt: now,
       updatedAt: now,
     };
-    this.store.put("task", task);
-    return task;
+    return this.store.transaction(() => {
+      validateTaskRelations(this.store, task);
+      this.store.put("task", task);
+      this.store.put("task_revision", {
+        ...task,
+        id: `${task.id}:1`,
+        taskId: task.id,
+      });
+      return task;
+    });
   }
   createProject(input: unknown): Project {
     const data = ProjectInput.parse(input);
@@ -85,7 +95,7 @@ export class WorkService {
           "active_run",
           "执行期间请先暂停并结束当前运行，再修改任务",
         );
-      const data = TaskInput.parse(input);
+      const data = TaskInput.parse({ ...task, ...(input as object) });
       if (data.projectId) this.required("project", data.projectId);
       const updated = {
         ...task,
@@ -94,7 +104,13 @@ export class WorkService {
         status: "planned",
         updatedAt: new Date().toISOString(),
       };
+      validateTaskRelations(this.store, updated);
       this.store.put("task", updated);
+      this.store.put("task_revision", {
+        ...updated,
+        id: `${id}:${updated.revision}`,
+        taskId: id,
+      });
       return updated;
     });
   }
@@ -105,6 +121,25 @@ export class WorkService {
       ? this.required<Project>("project", task.projectId)
       : null;
     const checks: { label: string; passed: boolean; detail: string }[] = [];
+    checks.push({
+      label: "任务状态",
+      passed: !["done", "cancelled", "awaiting_acceptance"].includes(
+        task.status,
+      ),
+      detail: ["done", "cancelled", "awaiting_acceptance"].includes(task.status)
+        ? "请先验收当前交付或显式建立新的任务版本"
+        : "任务可进入执行准备",
+    });
+    const blockedBy = task.dependsOn.filter(
+      (id) => this.store.get<Task>("task", id)?.status !== "done",
+    );
+    checks.push({
+      label: "任务依赖",
+      passed: blockedBy.length === 0,
+      detail: blockedBy.length
+        ? `等待${blockedBy.length}项前置任务验收`
+        : "前置任务已满足",
+    });
     let baseCommit: string | null = null;
     if (project) {
       try {
@@ -131,16 +166,17 @@ export class WorkService {
       label: "执行方式",
       passed:
         task.type === "manual" ||
-        (task.type === "development" &&
-          this.runtime.available &&
+        (this.runtime.available &&
           !!project?.allowAgent &&
-          !!project?.testCommand &&
+          (task.type === "diagnosis" || !!project?.testCommand) &&
           !!baseCommit),
       detail:
         task.type === "manual"
           ? "人工执行：提交成果后验收"
           : this.runtime.available
-            ? "需要开发任务、仓库授权和可执行测试命令"
+            ? task.type === "diagnosis"
+              ? "需要仓库与Agent授权；全流程只读，不执行修复"
+              : "需要开发任务、仓库授权和可执行测试命令"
             : "Codex未检测到，不能派发真实执行",
     });
     const context = new ResourceService(this.store).context(
@@ -148,12 +184,17 @@ export class WorkService {
       task.knowledgeVersionIds,
       task.workflowVersionId,
       task.projectId,
+      task.type === "diagnosis" ? "diagnosis" : "development",
     );
     const manifest = {
       taskId: id,
       taskRevision: task.revision,
       taskDigest: digest(task),
       task,
+      diagnosis:
+        task.type === "diagnosis"
+          ? new DiagnosisService(this.store).snapshot(task.id)
+          : null,
       context,
       planRevision: 1,
       runtimeVersion: this.runtime.version,
@@ -161,7 +202,9 @@ export class WorkService {
       baseCommit,
       workflowVersion: context.workflow
         ? `${context.workflow.name}@${context.workflow.version}`
-        : "feature-development@1.0.0",
+        : task.type === "diagnosis"
+          ? "incident-diagnosis@1.0.0"
+          : "feature-development@1.0.0",
       runtime:
         task.type === "manual"
           ? "manual"
@@ -300,11 +343,21 @@ export class WorkService {
         if (action === "cancel") return this.transition(id, "cancelling");
         if (action === "resume" && run.status === "paused") {
           const frozenTask = run.manifest.task as Task;
+          if (
+            (frozenTask.dependsOn ?? []).some(
+              (id) => this.store.get<Task>("task", id)?.status !== "done",
+            )
+          )
+            throw new DomainError(
+              "dependency_incomplete",
+              "前置任务需要先完成验收",
+            );
           new ResourceService(this.store).context(
             frozenTask.skillVersionIds ?? [],
             frozenTask.knowledgeVersionIds ?? [],
             frozenTask.workflowVersionId ?? null,
             frozenTask.projectId,
+            frozenTask.type === "diagnosis" ? "diagnosis" : "development",
           );
           const binding = this.required<{
             id: string;
@@ -402,7 +455,11 @@ export class WorkService {
     });
   }
   replan(id: string, expectedRevision: number, nodes: unknown, reason: string) {
-    const plan = validatePlan(nodes);
+    const type = this.required<Run>("run", id).manifest.task as Task;
+    const plan = validatePlan(
+      nodes,
+      type.type === "diagnosis" ? "diagnosis" : "development",
+    );
     if (!reason.trim() || reason.length > 4000)
       throw new DomainError(
         "reason_required",
@@ -494,6 +551,20 @@ export class WorkService {
         throw new DomainError("stale_delivery", "交付物不属于当前待验收版本");
       if (!accepted && !reason.trim())
         throw new DomainError("reason_required", "退回时请填写原因", 422);
+      if (
+        accepted &&
+        this.store
+          .list<Task>("task")
+          .some((child) => child.parentId === taskId && child.status !== "done")
+      )
+        throw new DomainError("children_incomplete", "必需子任务尚未全部验收");
+      if (
+        accepted &&
+        (task.dependsOn ?? []).some(
+          (id) => this.store.get<Task>("task", id)?.status !== "done",
+        )
+      )
+        throw new DomainError("dependency_incomplete", "前置任务尚未全部验收");
       this.store.put("acceptance", {
         id: randomUUID(),
         taskId,
