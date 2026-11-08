@@ -19,6 +19,7 @@ const labels: Record<string, string> = {
   pending: "待执行",
 };
 type Delivery = {
+  artifacts?: string[];
   id: string;
   runId: string;
   summary: string;
@@ -102,7 +103,10 @@ function App() {
         .then(setEvents)
         .catch((e) => setError(e.message));
     void load();
-    const timer = setInterval(() => void load(), 3000);
+    const timer = setInterval(() => {
+      void load();
+      void refresh().catch((e) => setError(e.message));
+    }, 3000);
     return () => clearInterval(timer);
   }, [selected, connected]);
   const active = tasks.filter((t) => t.status === "in_progress").length,
@@ -496,6 +500,41 @@ function App() {
                         <div className="delivery" key={d.id}>
                           <h3>交付成果</h3>
                           <pre>{d.summary}</pre>
+                          {d.artifacts?.map((name) => (
+                            <button
+                              className="quiet"
+                              key={name}
+                              onClick={() =>
+                                void act(async () => {
+                                  const response = await fetch(
+                                    `/api/v1/runs/${d.runId}/artifacts/${name}`,
+                                    {
+                                      headers: {
+                                        Authorization: `Bearer ${token}`,
+                                      },
+                                    },
+                                  );
+                                  if (!response.ok)
+                                    throw new Error(
+                                      (await response.json()).message,
+                                    );
+                                  const url = URL.createObjectURL(
+                                      await response.blob(),
+                                    ),
+                                    link = document.createElement("a");
+                                  link.href = url;
+                                  link.download = name;
+                                  link.click();
+                                  setTimeout(
+                                    () => URL.revokeObjectURL(url),
+                                    1000,
+                                  );
+                                })
+                              }
+                            >
+                              下载 {name}
+                            </button>
+                          ))}
                           {currentTask.status === "awaiting_acceptance" && (
                             <form
                               onSubmit={(e) => {
@@ -603,7 +642,25 @@ function App() {
                   const f = e.currentTarget,
                     fd = new FormData(f);
                   void act(async () => {
-                    await api("/projects", Object.fromEntries(fd));
+                    const executable = String(
+                      fd.get("testExecutable") ?? "",
+                    ).trim();
+                    await api("/projects", {
+                      name: fd.get("name"),
+                      repositoryPath: fd.get("repositoryPath"),
+                      description: fd.get("description"),
+                      allowAgent: fd.get("allowAgent") === "on",
+                      ...(executable
+                        ? {
+                            testCommand: {
+                              executable,
+                              args: JSON.parse(
+                                String(fd.get("testArgs") || "[]"),
+                              ),
+                            },
+                          }
+                        : {}),
+                    });
                     f.reset();
                     await refresh();
                   });
@@ -625,6 +682,28 @@ function App() {
                   项目说明
                   <textarea name="description" />
                 </label>
+                <label>
+                  测试程序
+                  <input
+                    name="testExecutable"
+                    placeholder="可执行文件绝对路径，例如 node.exe"
+                  />
+                </label>
+                <label>
+                  测试参数（JSON数组）
+                  <input
+                    name="testArgs"
+                    defaultValue="[]"
+                    placeholder='["--test"]'
+                  />
+                </label>
+                <label className="checkbox">
+                  <input type="checkbox" name="allowAgent" />
+                  授权 Agent 在隔离工作区修改代码，并运行上述测试程序
+                </label>
+                <p>
+                  测试程序按项目配置直接运行，使用当前用户权限。仅配置受信任的程序和参数。
+                </p>
                 <button disabled={busy}>连接仓库</button>
               </form>
               {projects.map((p) => (
@@ -676,9 +755,7 @@ function App() {
                   执行方式
                   <select name="type" defaultValue="manual">
                     <option value="manual">人工执行</option>
-                    <option value="development">
-                      Agent 需求开发（接入中）
-                    </option>
+                    <option value="development">Codex 需求开发</option>
                     <option value="diagnosis">Agent 故障诊断（接入中）</option>
                   </select>
                 </label>

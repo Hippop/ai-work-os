@@ -1,7 +1,8 @@
 import express from "express";
 import { z, ZodError } from "zod";
-import { resolve } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { resolve, join } from "node:path";
+import { timingSafeEqual, createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import {
@@ -10,9 +11,13 @@ import {
   type Task,
 } from "../../packages/domain/index.js";
 
-export function createApp(store: Store, token: string) {
-  const app = express(),
-    service = new WorkService(store);
+export function createApp(
+  store: Store,
+  token: string,
+  service = new WorkService(store),
+  dataDir?: string,
+) {
+  const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "128kb" }));
   app.use("/api", (req, res, next) => {
@@ -34,12 +39,10 @@ export function createApp(store: Store, token: string) {
     const a = Buffer.from(provided),
       b = Buffer.from(token);
     if (!a.length || a.length !== b.length || !timingSafeEqual(a, b)) {
-      res
-        .status(401)
-        .json({
-          code: "authentication_required",
-          message: "请输入本机服务访问令牌",
-        });
+      res.status(401).json({
+        code: "authentication_required",
+        message: "请输入本机服务访问令牌",
+      });
       return;
     }
     next();
@@ -111,6 +114,34 @@ export function createApp(store: Store, token: string) {
         ),
       ),
   );
+  app.get("/api/v1/runs/:id/artifacts/:name", (req, res) => {
+    const delivery = store
+      .list<{
+        runId: string;
+        artifacts?: string[];
+        artifactDigests?: Record<string, string>;
+      }>("delivery")
+      .find((d) => d.runId === req.params.id);
+    const name = req.params.name;
+    if (
+      !dataDir ||
+      !delivery?.artifacts?.includes(name) ||
+      !/^[a-zA-Z0-9.-]+$/.test(name)
+    )
+      throw new DomainError("not_found", "产物不存在", 404);
+    const content = readFileSync(
+      join(dataDir, "artifacts", req.params.id, name),
+    );
+    if (
+      createHash("sha256").update(content).digest("hex") !==
+      delivery.artifactDigests?.[name]
+    )
+      throw new DomainError(
+        "artifact_changed",
+        "产物摘要校验失败，不能作为有效交付使用",
+      );
+    res.type("application/octet-stream").attachment(name).send(content);
+  });
   app.get("/api/v1/deliveries", (_req, res) =>
     res.json(store.list("delivery")),
   );
@@ -157,14 +188,12 @@ export function createApp(store: Store, token: string) {
       _next: express.NextFunction,
     ) => {
       if (error instanceof ZodError) {
-        res
-          .status(422)
-          .json({
-            code: "validation_error",
-            message: error.issues
-              .map((i) => `${i.path.join(".")}: ${i.message}`)
-              .join("; "),
-          });
+        res.status(422).json({
+          code: "validation_error",
+          message: error.issues
+            .map((i) => `${i.path.join(".")}: ${i.message}`)
+            .join("; "),
+        });
         return;
       }
       if (error instanceof DomainError) {
@@ -180,12 +209,10 @@ export function createApp(store: Store, token: string) {
         return;
       }
       console.error(error);
-      res
-        .status(500)
-        .json({
-          code: "internal_error",
-          message: "服务内部错误，请查看本机日志",
-        });
+      res.status(500).json({
+        code: "internal_error",
+        message: "服务内部错误，请查看本机日志",
+      });
     },
   );
   return app;

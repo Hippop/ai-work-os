@@ -11,6 +11,7 @@ export const TaskInput = z.object({
     .min(1)
     .max(50),
   priority: z.enum(["low", "normal", "high"]).default("normal"),
+  maxMinutes: z.number().int().min(1).max(120).default(30),
 });
 export type TaskData = z.infer<typeof TaskInput>;
 export type Task = TaskData & {
@@ -24,6 +25,13 @@ export const ProjectInput = z.object({
   name: z.string().trim().min(1).max(120),
   repositoryPath: z.string().trim().min(1).max(2000),
   description: z.string().max(10000).default(""),
+  allowAgent: z.boolean().default(false),
+  testCommand: z
+    .object({
+      executable: z.string().min(1).max(2000),
+      args: z.array(z.string().max(4000)).max(100),
+    })
+    .optional(),
 });
 export type Project = z.infer<typeof ProjectInput> & {
   id: string;

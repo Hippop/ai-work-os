@@ -16,7 +16,13 @@ import {
 } from "../domain/index.js";
 
 export class WorkService {
-  constructor(public store: Store) {}
+  constructor(
+    public store: Store,
+    public runtime: { available: boolean; version: string | null } = {
+      available: false,
+      version: null,
+    },
+  ) {}
   required<T>(kind: string, id: string): T {
     const item = this.store.get<T>(kind, id);
     if (!item) throw new DomainError("not_found", "记录不存在", 404);
@@ -91,7 +97,8 @@ export class WorkService {
     });
   }
   prepare(id: string) {
-    const task = this.required<Task>("task", id);
+    const saved = this.required<Task>("task", id);
+    const task = { ...saved, ...TaskInput.parse(saved) };
     const project = task.projectId
       ? this.required<Project>("project", task.projectId)
       : null;
@@ -120,20 +127,35 @@ export class WorkService {
     });
     checks.push({
       label: "执行方式",
-      passed: task.type === "manual",
+      passed:
+        task.type === "manual" ||
+        (task.type === "development" &&
+          this.runtime.available &&
+          !!project?.allowAgent &&
+          !!project?.testCommand &&
+          !!baseCommit),
       detail:
         task.type === "manual"
           ? "人工执行：提交成果后验收"
-          : "Agent Worker 接入尚在实现；当前禁止派发真实执行",
+          : this.runtime.available
+            ? "需要开发任务、仓库授权和可执行测试命令"
+            : "Codex未检测到，不能派发真实执行",
     });
     const manifest = {
       taskId: id,
       taskRevision: task.revision,
       taskDigest: digest(task),
+      task,
+      runtimeVersion: this.runtime.version,
       project,
       baseCommit,
       workflowVersion: "feature-development@1.0.0",
-      runtime: task.type === "manual" ? "manual" : "unavailable",
+      runtime:
+        task.type === "manual"
+          ? "manual"
+          : this.runtime.available
+            ? "codex"
+            : "unavailable",
     };
     return {
       manifest,
@@ -257,11 +279,14 @@ export class WorkService {
   control(id: string, action: string) {
     return this.store.transaction(() => {
       const run = this.required<Run>("run", id);
-      if (run.runtime !== "manual")
+      if (run.runtime !== "manual") {
+        if (action === "pause") return this.transition(id, "pausing");
+        if (action === "cancel") return this.transition(id, "cancelling");
         throw new DomainError(
-          "runtime_unavailable",
-          "需要 Worker 确认执行停止",
+          "recovery_required",
+          "需要核对原进程与工作区，暂不自动重跑",
         );
+      }
       if (action === "pause") {
         this.transition(id, "pausing");
         return this.transition(id, "paused");

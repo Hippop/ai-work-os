@@ -9,6 +9,14 @@ export class Store {
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    const version = Number(
+      (this.db.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+    );
+    if (version > 1) {
+      this.db.close();
+      throw new Error(`Unsupported database schema version: ${version}`);
+    }
     this.db
       .exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS entities(kind TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(kind,id));
