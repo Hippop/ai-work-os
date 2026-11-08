@@ -10,6 +10,7 @@ import { Supervisor } from "../packages/runtime/supervisor.js";
 import { type Run, type Task } from "../packages/domain/index.js";
 import request from "supertest";
 import { createApp } from "../apps/server/app.js";
+import { defaultPlan } from "../packages/resources/index.js";
 
 function setup() {
   const root = mkdtempSync(join(tmpdir(), "aiwork-runtime-")),
@@ -189,6 +190,141 @@ test("cancellation waits for process-tree stop before releasing worktree", async
       false,
     );
     assert.equal(f.store.list("delivery").length, 0);
+  } finally {
+    previous === undefined
+      ? delete process.env.AI_WORK_OS_FIXTURE_HANG
+      : (process.env.AI_WORK_OS_FIXTURE_HANG = previous);
+    await f.supervisor.close();
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("paused worker rebuilds context in the same worktree and keeps interrupted attempt history", async () => {
+  const f = setup(),
+    previous = process.env.AI_WORK_OS_FIXTURE_HANG;
+  process.env.AI_WORK_OS_FIXTURE_HANG = "implement";
+  try {
+    const run = f.service.start(
+      f.task.id,
+      f.service.prepare(f.task.id).preparationDigest,
+      "resume",
+    );
+    await until(
+      () =>
+        f.service
+          .required<Run>("run", run.id)
+          .steps.some((s) => s.key === "implement" && s.status === "running"),
+      () => f.supervisor.tick(),
+    );
+    f.service.control(run.id, "pause");
+    await until(
+      () => f.service.required<Run>("run", run.id).status === "paused",
+      () => f.supervisor.tick(),
+    );
+    const before = f.store.get<any>("workspace", run.id);
+    assert.equal(before.locked, false);
+    assert.ok(before.checkpointDigest);
+    delete process.env.AI_WORK_OS_FIXTURE_HANG;
+    f.service.control(run.id, "resume");
+    await until(
+      () =>
+        ["succeeded", "failed", "reconciling"].includes(
+          f.service.required<Run>("run", run.id).status,
+        ),
+      () => f.supervisor.tick(),
+    );
+    assert.equal(
+      f.service.required<Run>("run", run.id).status,
+      "succeeded",
+      JSON.stringify(f.store.events(run.id)),
+    );
+    assert.equal(
+      f.store.get<any>("workspace", run.id).workspace,
+      before.workspace,
+    );
+    assert.ok(
+      f.store.list<any>("attempt").some((a) => a.status === "interrupted"),
+    );
+    const delivery = f.store.list<any>("delivery")[0];
+    assert.ok(delivery.artifactSubdir);
+    assert.equal(
+      f.store.list<any>("attempt").filter((a) => a.stepKey === "analyze")
+        .length,
+      1,
+    );
+    assert.equal(
+      f.store.list<any>("attempt").filter((a) => a.stepKey === "design").length,
+      1,
+    );
+    assert.equal(readFileSync(join(f.repo, "answer.txt"), "utf8"), "0");
+  } finally {
+    previous === undefined
+      ? delete process.env.AI_WORK_OS_FIXTURE_HANG
+      : (process.env.AI_WORK_OS_FIXTURE_HANG = previous);
+    await f.supervisor.close();
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("manual workspace drift requires a new validated plan and old plan remains available", async () => {
+  const f = setup(),
+    previous = process.env.AI_WORK_OS_FIXTURE_HANG;
+  process.env.AI_WORK_OS_FIXTURE_HANG = "1";
+  try {
+    const run = f.service.start(
+      f.task.id,
+      f.service.prepare(f.task.id).preparationDigest,
+      "replan",
+    );
+    await until(
+      () =>
+        f.service
+          .required<Run>("run", run.id)
+          .steps.some((s) => s.status === "running"),
+      () => f.supervisor.tick(),
+    );
+    f.service.control(run.id, "pause");
+    await until(
+      () => f.service.required<Run>("run", run.id).status === "paused",
+      () => f.supervisor.tick(),
+    );
+    const binding = f.store.get<any>("workspace", run.id);
+    writeFileSync(join(binding.workspace, "answer.txt"), "partial manual edit");
+    assert.throws(() => f.service.control(run.id, "resume"), /代码已变化/);
+    const plan = defaultPlan.map((n) =>
+      n.key === "test" ? { ...n, dependsOn: ["verify_extra"] } : n,
+    );
+    plan.splice(3, 0, {
+      key: "verify_extra",
+      operation: "analyze",
+      title: "Inspect manual changes",
+      dependsOn: ["implement"],
+    });
+    f.service.replan(
+      run.id,
+      1,
+      plan,
+      "Accept manual edit and invalidate earlier evidence",
+    );
+    assert.ok(f.store.get("plan_revision", `${run.id}:1`));
+    assert.throws(() => f.service.replan(run.id, 1, plan, "stale"), /冲突/);
+    delete process.env.AI_WORK_OS_FIXTURE_HANG;
+    f.service.control(run.id, "resume");
+    await until(
+      () =>
+        ["succeeded", "failed", "reconciling"].includes(
+          f.service.required<Run>("run", run.id).status,
+        ),
+      () => f.supervisor.tick(),
+    );
+    assert.equal(
+      f.service.required<Run>("run", run.id).status,
+      "succeeded",
+      JSON.stringify(f.store.events(run.id)),
+    );
+    assert.equal(f.service.required<Run>("run", run.id).steps.length, 7);
   } finally {
     previous === undefined
       ? delete process.env.AI_WORK_OS_FIXTURE_HANG

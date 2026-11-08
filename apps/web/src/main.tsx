@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Task, Project, Run, Event } from "../../../packages/domain/index";
 import "./style.css";
+import { ResourceManager } from "./ResourceManager";
+import { PlanEditor } from "./PlanEditor";
 
 const labels: Record<string, string> = {
   inbox: "收件箱",
@@ -35,7 +37,16 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([]),
     [projects, setProjects] = useState<Project[]>([]),
     [runs, setRuns] = useState<Run[]>([]),
-    [deliveries, setDeliveries] = useState<Delivery[]>([]);
+    [deliveries, setDeliveries] = useState<Delivery[]>([]),
+    [resources, setResources] = useState<
+      {
+        id: string;
+        name: string;
+        version: string;
+        kind: string;
+        status: string;
+      }[]
+    >([]);
   const [selected, setSelected] = useState<string>(),
     [events, setEvents] = useState<Event[]>([]),
     [busy, setBusy] = useState(false),
@@ -65,16 +76,18 @@ function App() {
     return result;
   }
   async function refresh() {
-    const [t, p, r, d] = await Promise.all([
+    const [t, p, r, d, versions] = await Promise.all([
       api<Task[]>("/tasks"),
       api<Project[]>("/projects"),
       api<Run[]>("/runs"),
       api<Delivery[]>("/deliveries"),
+      api<typeof resources>("/resources"),
     ]);
     setTasks(t);
     setProjects(p);
     setRuns(r);
     setDeliveries(d);
+    setResources(versions);
   }
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -133,6 +146,9 @@ function App() {
         type: form.get("type"),
         priority: form.get("priority"),
         projectId: form.get("projectId") || null,
+        skillVersionIds: form.getAll("skillVersionIds"),
+        knowledgeVersionIds: form.getAll("knowledgeVersionIds"),
+        workflowVersionId: form.get("workflowVersionId") || null,
         acceptanceCriteria: String(form.get("criteria"))
           .split("\n")
           .map((s) => s.trim())
@@ -187,20 +203,22 @@ function App() {
           </span>
         </div>
         <div className="nav-title">WORKSPACE</div>
-        {["工作台", "执行台", "优化中心", "项目与仓库"].map((item, index) => (
-          <button
-            className={`nav ${page === item ? "active" : ""}`}
-            key={item}
-            onClick={() => {
-              setPage(item);
-              setPrepared(undefined);
-            }}
-          >
-            <span>{["▦", "▷", "↗", "▱"][index]}</span>
-            {item}
-            {item === "执行台" && active > 0 && <b>{active}</b>}
-          </button>
-        ))}
+        {["工作台", "执行台", "优化中心", "项目与仓库", "能力与知识"].map(
+          (item, index) => (
+            <button
+              className={`nav ${page === item ? "active" : ""}`}
+              key={item}
+              onClick={() => {
+                setPage(item);
+                setPrepared(undefined);
+              }}
+            >
+              <span>{["▦", "▷", "↗", "▱", "◈"][index]}</span>
+              {item}
+              {item === "执行台" && active > 0 && <b>{active}</b>}
+            </button>
+          ),
+        )}
         <div className="sidebar-bottom">
           <i /> 本机服务已连接<small>LOCAL FIRST · v0.1 开发中</small>
         </div>
@@ -633,6 +651,28 @@ function App() {
               </div>
             </>
           )}
+          {page === "能力与知识" && <ResourceManager api={api} act={act} />}
+          {currentRun?.status === "paused" &&
+            currentRun.runtime !== "manual" &&
+            page === "执行台" && (
+              <div className="panel">
+                <PlanEditor
+                  key={currentRun.id + ":" + currentRun.manifest.planRevision}
+                  run={currentRun}
+                  submit={(nodes, reason) =>
+                    act(async () => {
+                      await api(`/runs/${currentRun.id}/plan-proposals`, {
+                        expectedRevision:
+                          Number(currentRun.manifest.planRevision) || 1,
+                        nodes: JSON.parse(String(nodes)),
+                        reason,
+                      });
+                      await refresh();
+                    })
+                  }
+                />
+              </div>
+            )}
           {page === "项目与仓库" && (
             <div className="panel">
               <h2>添加项目</h2>
@@ -779,6 +819,44 @@ function App() {
                   ))}
                 </select>
               </label>
+              <label>
+                工作流版本
+                <select name="workflowVersionId">
+                  <option value="">标准开发流程</option>
+                  {resources
+                    .filter(
+                      (r) => r.kind === "workflow" && r.status === "published",
+                    )
+                    .map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} @{r.version}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {(["skill", "knowledge"] as const).map((kind) => (
+                <label key={kind}>
+                  {kind === "skill" ? "Skill版本" : "知识版本"}（可多选）
+                  <select
+                    name={
+                      kind === "skill"
+                        ? "skillVersionIds"
+                        : "knowledgeVersionIds"
+                    }
+                    multiple
+                  >
+                    {resources
+                      .filter(
+                        (r) => r.kind === kind && r.status === "published",
+                      )
+                      .map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name} @{r.version}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              ))}
               <label>
                 验收条件（每行一项）
                 <textarea

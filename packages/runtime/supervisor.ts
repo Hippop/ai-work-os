@@ -9,6 +9,8 @@ import { createWorkspace, workspaceDigest } from "../workspace/index.js";
 import type { Job, WorkerMessage } from "./protocol.js";
 
 type Active = {
+  outputDir: string;
+  artifactSubdir?: string;
   child: ChildProcess;
   epoch: string;
   lastHeartbeat: number;
@@ -71,7 +73,7 @@ export class Supervisor {
       .get() as { id: string; run_id: string } | undefined;
     if (!row) return;
     const run = this.service.required<Run>("run", row.run_id);
-    if (run.status !== "queued") {
+    if (run.status !== "queued" && run.status !== "preparing") {
       this.store.db
         .prepare("UPDATE outbox SET state='done' WHERE id=?")
         .run(row.id);
@@ -84,17 +86,48 @@ export class Supervisor {
           "UPDATE outbox SET state='claimed' WHERE id=? AND state='pending'",
         )
         .run(row.id);
-      this.service.transition(run.id, "preparing");
+      if (run.status === "queued") this.service.transition(run.id, "preparing");
     });
     try {
       const project = run.manifest.project as Project;
-      const workspace = createWorkspace(
-        join(this.dataDir, "workspaces"),
-        project.repositoryPath,
+      const existing = this.store.get<{ workspace: string; locked: boolean }>(
+        "workspace",
         run.id,
-        String(run.manifest.baseCommit),
       );
+      if (existing?.locked) throw new Error("Existing workspace still locked");
+      const workspace =
+        existing?.workspace ??
+        createWorkspace(
+          join(this.dataDir, "workspaces"),
+          project.repositoryPath,
+          run.id,
+          String(run.manifest.baseCommit),
+        );
       const task = run.manifest.task as Task;
+      const deadline =
+        Number(run.manifest.deadline) || Date.now() + task.maxMinutes * 60000;
+      const outputDir = existing
+        ? join(this.dataDir, "artifacts", run.id, epoch)
+        : join(this.dataDir, "artifacts", run.id);
+      const attempts = this.store.list<{
+        runId: string;
+        stepKey: string;
+        status: string;
+        detail: unknown;
+      }>("attempt");
+      const completed = Object.fromEntries(
+        run.steps
+          .filter((s) => s.status === "succeeded")
+          .map((s) => [
+            s.key,
+            attempts.find(
+              (a) =>
+                a.runId === run.id &&
+                a.stepKey === s.key &&
+                a.status === "succeeded",
+            )?.detail,
+          ]),
+      );
       const binding = {
         id: run.id,
         workspace,
@@ -104,6 +137,11 @@ export class Supervisor {
         locked: true,
       };
       this.store.transaction(() => {
+        const latest = this.service.required<Run>("run", run.id);
+        this.store.put("run", {
+          ...latest,
+          manifest: { ...latest.manifest, deadline },
+        });
         this.store.put("workspace", binding);
         this.service.transition(run.id, "running");
         this.store.event(run.id, "workspace.created", binding);
@@ -112,13 +150,18 @@ export class Supervisor {
         runId: run.id,
         epoch,
         workspace,
-        outputDir: join(this.dataDir, "artifacts", run.id),
+        outputDir,
         command: this.command,
         commandPrefix: this.commandPrefix,
         objective: task.objective,
         criteria: task.acceptanceCriteria,
         testCommand: project.testCommand!,
-        deadline: Date.now() + task.maxMinutes * 60000,
+        deadline,
+        completed,
+        context: run.manifest.context,
+        plan:
+          (run.manifest.activePlan as Job["plan"]) ??
+          (run.manifest.context as { plan: Job["plan"] })?.plan,
       };
       const child = fork(
         new URL("../../apps/worker/index.ts", import.meta.url),
@@ -129,7 +172,13 @@ export class Supervisor {
           windowsHide: true,
         },
       );
-      const active: Active = { child, epoch, lastHeartbeat: Date.now() };
+      const active: Active = {
+        child,
+        epoch,
+        outputDir,
+        artifactSubdir: existing ? epoch : undefined,
+        lastHeartbeat: Date.now(),
+      };
       this.active.set(run.id, active);
       child.stderr?.on("data", () => {}); // Worker error content is not exposed as an unaudited successful result.
       child.on("message", (message) =>
@@ -202,19 +251,56 @@ export class Supervisor {
     this.store.transaction(() => {
       const run = this.service.required<Run>("run", id);
       this.store.event(id, "worker.stopped", { code, epoch: active.epoch });
+      for (const attempt of this.store.list<{
+        id: string;
+        runId: string;
+        epoch: string;
+        status: string;
+      }>("attempt")) {
+        if (
+          attempt.runId === id &&
+          attempt.epoch === active.epoch &&
+          attempt.status === "running"
+        )
+          this.store.put("attempt", {
+            ...attempt,
+            status: code === 0 ? "interrupted" : "unknown",
+          });
+      }
       const binding = this.store.get<{ id: string; locked: boolean }>(
         "workspace",
         id,
       );
-      if (binding && code === 0)
-        this.store.put("workspace", { ...binding, locked: false });
+      let checkpointDigest: string | undefined;
+      if (binding && code === 0) {
+        try {
+          checkpointDigest = workspaceDigest(
+            (binding as unknown as { workspace: string }).workspace,
+          );
+        } catch (error) {
+          this.store.event(id, "checkpoint.failed", {
+            message: (error as Error).message,
+          });
+        }
+        this.store.put("workspace", {
+          ...binding,
+          locked: false,
+          checkpointDigest,
+        });
+      }
       if (run.status === "cancelling" && code === 0) {
         this.service.transition(id, "cancelled");
         const task = this.service.required<Task>("task", run.taskId);
         this.store.put("task", { ...task, status: "planned" });
-      } else if (run.status === "pausing" && code === 0)
-        this.service.transition(id, "paused");
-      else if (run.status === "running" && code === 0 && active.result) {
+      } else if (run.status === "pausing" && code === 0 && checkpointDigest) {
+        const paused = this.service.transition(id, "paused");
+        this.store.put("run", {
+          ...paused,
+          steps: paused.steps.map((s) =>
+            s.status === "running" ? { ...s, status: "paused" } : s,
+          ),
+        });
+      } else if (run.status === "running" && code === 0 && active.result) {
         let evidenceValid = false;
         try {
           const workspace = this.store.get<{ workspace: string }>(
@@ -228,9 +314,7 @@ export class Supervisor {
               (name) =>
                 /^[a-zA-Z0-9.-]+$/.test(name) &&
                 createHash("sha256")
-                  .update(
-                    readFileSync(join(this.dataDir, "artifacts", id, name)),
-                  )
+                  .update(readFileSync(join(active.outputDir, name)))
                   .digest("hex") === active.result!.artifactDigests[name],
             );
         } catch {
@@ -248,6 +332,7 @@ export class Supervisor {
             runId: id,
             taskRevision: run.taskRevision,
             ...active.result,
+            artifactSubdir: active.artifactSubdir,
             createdAt: new Date().toISOString(),
           };
           this.store.put("delivery", delivery);

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { Store } from "../persistence/index.js";
+import { ResourceService, validatePlan } from "../resources/index.js";
+import { workspaceDigest } from "../workspace/index.js";
 import {
   TaskInput,
   ProjectInput,
@@ -141,15 +143,25 @@ export class WorkService {
             ? "需要开发任务、仓库授权和可执行测试命令"
             : "Codex未检测到，不能派发真实执行",
     });
+    const context = new ResourceService(this.store).context(
+      task.skillVersionIds,
+      task.knowledgeVersionIds,
+      task.workflowVersionId,
+      task.projectId,
+    );
     const manifest = {
       taskId: id,
       taskRevision: task.revision,
       taskDigest: digest(task),
       task,
+      context,
+      planRevision: 1,
       runtimeVersion: this.runtime.version,
       project,
       baseCommit,
-      workflowVersion: "feature-development@1.0.0",
+      workflowVersion: context.workflow
+        ? `${context.workflow.name}@${context.workflow.version}`
+        : "feature-development@1.0.0",
       runtime:
         task.type === "manual"
           ? "manual"
@@ -220,13 +232,17 @@ export class WorkService {
                   attempts: 0,
                 },
               ]
-            : workflow.map(([key, title]) => ({
-                id: randomUUID(),
-                key,
-                title,
-                status: "pending",
-                attempts: 0,
-              })),
+            : prepared.manifest.context.plan.map(
+                ({ key, title, operation, dependsOn }) => ({
+                  id: randomUUID(),
+                  key,
+                  title,
+                  operation,
+                  dependsOn,
+                  status: "pending",
+                  attempts: 0,
+                }),
+              ),
         createdAt: now,
         updatedAt: now,
         runtime: prepared.manifest.runtime,
@@ -282,6 +298,53 @@ export class WorkService {
       if (run.runtime !== "manual") {
         if (action === "pause") return this.transition(id, "pausing");
         if (action === "cancel") return this.transition(id, "cancelling");
+        if (action === "resume" && run.status === "paused") {
+          const frozenTask = run.manifest.task as Task;
+          new ResourceService(this.store).context(
+            frozenTask.skillVersionIds ?? [],
+            frozenTask.knowledgeVersionIds ?? [],
+            frozenTask.workflowVersionId ?? null,
+            frozenTask.projectId,
+          );
+          const binding = this.required<{
+            id: string;
+            workspace: string;
+            locked: boolean;
+            checkpointDigest?: string;
+          }>("workspace", id);
+          if (binding.locked || !binding.checkpointDigest)
+            throw new DomainError(
+              "recovery_required",
+              "尚未确认旧执行停止或缺少检查点",
+            );
+          const currentDigest = workspaceDigest(binding.workspace);
+          if (currentDigest !== binding.checkpointDigest)
+            throw new DomainError(
+              "workspace_changed",
+              "暂停后代码已变化，请通过重新规划重建验证证据",
+            );
+          if (Number(run.manifest.deadline) <= Date.now())
+            throw new DomainError(
+              "budget_exhausted",
+              "运行时间预算已耗尽，请创建新运行",
+            );
+          const result = this.transition(id, "preparing");
+          this.store.put("run", {
+            ...result,
+            steps: result.steps.map((s) =>
+              ["running", "paused"].includes(s.status)
+                ? { ...s, status: "pending" }
+                : s,
+            ),
+          });
+          this.store.db
+            .prepare("INSERT INTO outbox(id,run_id,created_at) VALUES(?,?,?)")
+            .run(randomUUID(), id, new Date().toISOString());
+          this.store.event(id, "run.resume_requested", {
+            checkpointDigest: currentDigest,
+          });
+          return this.required<Run>("run", id);
+        }
         throw new DomainError(
           "recovery_required",
           "需要核对原进程与工作区，暂不自动重跑",
@@ -336,6 +399,77 @@ export class WorkService {
       const task = this.required<Task>("task", run.taskId);
       this.store.put("task", { ...task, status: "awaiting_acceptance" });
       return delivery;
+    });
+  }
+  replan(id: string, expectedRevision: number, nodes: unknown, reason: string) {
+    const plan = validatePlan(nodes);
+    if (!reason.trim() || reason.length > 4000)
+      throw new DomainError(
+        "reason_required",
+        "请填写流程变更及证据失效原因",
+        422,
+      );
+    return this.store.transaction(() => {
+      const run = this.required<Run>("run", id),
+        revision = Number(run.manifest.planRevision) || 1;
+      if (run.runtime === "manual" || run.status !== "paused")
+        throw new DomainError(
+          "pause_required",
+          "请先暂停Agent运行并等待执行停止",
+        );
+      if (revision !== expectedRevision || revision >= 5)
+        throw new DomainError(
+          "revision_conflict",
+          "计划版本冲突或已达5个版本上限",
+        );
+      const binding = this.required<{
+        id: string;
+        workspace: string;
+        locked: boolean;
+      }>("workspace", id);
+      if (binding.locked)
+        throw new DomainError("workspace_locked", "旧执行未确认停止");
+      this.store.put("plan_revision", {
+        id: `${id}:${revision}`,
+        runId: id,
+        revision,
+        steps: run.steps,
+        plan:
+          run.manifest.activePlan ??
+          (run.manifest.context as { plan: unknown }).plan,
+        reason,
+      });
+      const updated = {
+        ...run,
+        steps: plan.map((node) => ({
+          ...node,
+          id: randomUUID(),
+          status: "pending",
+          attempts: 0,
+        })),
+        manifest: {
+          ...run.manifest,
+          activePlan: plan,
+          planRevision: revision + 1,
+        },
+      };
+      this.store.put("run", updated);
+      this.store.put("workspace", {
+        ...binding,
+        checkpointDigest: workspaceDigest(binding.workspace),
+      });
+      this.store.event(
+        id,
+        "plan.revised",
+        {
+          from: revision,
+          to: revision + 1,
+          reason,
+          invalidatedStepIds: run.steps.map((s) => s.id),
+        },
+        "user",
+      );
+      return updated;
     });
   }
   accept(

@@ -10,6 +10,9 @@ export type Job = {
   criteria: string[];
   testCommand: TestCommand;
   deadline: number;
+  plan?: import("../resources/index.js").PlanNode[];
+  context?: unknown;
+  completed?: Record<string, unknown>;
 };
 export type WorkerMessage =
   | { type: "heartbeat"; epoch: string }

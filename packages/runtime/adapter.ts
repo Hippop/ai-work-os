@@ -106,6 +106,7 @@ export async function runAgent(
   key: string,
   prompt: string,
   onChild: (child: ChildProcess | null) => void,
+  operation = key,
 ) {
   const schemaPath = join(job.outputDir, "result.schema.json"),
     resultPath = join(job.outputDir, `${key}.json`);
@@ -127,7 +128,7 @@ export async function runAgent(
     "exec",
     "--json",
     "--sandbox",
-    key === "implement" ? "workspace-write" : "read-only",
+    operation === "implement" ? "workspace-write" : "read-only",
     "-C",
     job.workspace,
     "--output-schema",

@@ -6,6 +6,10 @@ import { readFileSync } from "node:fs";
 import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import {
+  ResourceService,
+  defaultPlan,
+} from "../../packages/resources/index.js";
+import {
   DomainError,
   type Run,
   type Task,
@@ -18,6 +22,7 @@ export function createApp(
   dataDir?: string,
 ) {
   const app = express();
+  const resources = new ResourceService(store);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "128kb" }));
   app.use("/api", (req, res, next) => {
@@ -30,6 +35,8 @@ export function createApp(
         "http://localhost:4310",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
+        `http://127.0.0.1:${req.socket.localPort}`,
+        `http://localhost:${req.socket.localPort}`,
       ].includes(origin)
     ) {
       res.status(403).json({ code: "origin_denied", message: "来源不允许" });
@@ -51,6 +58,43 @@ export function createApp(
     res.json({ status: "ok", schemaVersion: 1 }),
   );
   app.get("/api/v1/tasks", (_req, res) => res.json(store.list("task")));
+  app.get("/api/v1/resources", (_req, res) =>
+    res.json(
+      store.list<{ id: string }>("resource").map((resource) => ({
+        ...resource,
+        status: store.get<{ state: string }>("resource_status", resource.id)
+          ?.state,
+      })),
+    ),
+  );
+  app.get("/api/v1/capabilities", (_req, res) => res.json(defaultPlan));
+  app.post("/api/v1/resources", (req, res) =>
+    res.status(201).json(resources.create(req.body)),
+  );
+  app.post("/api/v1/resources/:id/publish", (req, res) =>
+    res.json(resources.publish(req.params.id)),
+  );
+  app.post("/api/v1/resources/:id/revoke", (req, res) => {
+    resources.revoke(req.params.id);
+    res.json({ status: "revoked" });
+  });
+  app.post("/api/v1/runs/:id/plan-proposals", (req, res) => {
+    const body = z
+      .object({
+        expectedRevision: z.number().int().positive(),
+        nodes: z.unknown(),
+        reason: z.string(),
+      })
+      .parse(req.body);
+    res.json(
+      service.replan(
+        req.params.id,
+        body.expectedRevision,
+        body.nodes,
+        body.reason,
+      ),
+    );
+  });
   app.post("/api/v1/tasks", (req, res) =>
     res.status(201).json(service.createTask(req.body)),
   );
@@ -120,6 +164,7 @@ export function createApp(
         runId: string;
         artifacts?: string[];
         artifactDigests?: Record<string, string>;
+        artifactSubdir?: string;
       }>("delivery")
       .find((d) => d.runId === req.params.id);
     const name = req.params.name;
@@ -130,7 +175,15 @@ export function createApp(
     )
       throw new DomainError("not_found", "产物不存在", 404);
     const content = readFileSync(
-      join(dataDir, "artifacts", req.params.id, name),
+      join(
+        dataDir,
+        "artifacts",
+        req.params.id,
+        ...(delivery.artifactSubdir
+          ? [z.string().uuid().parse(delivery.artifactSubdir)]
+          : []),
+        name,
+      ),
     );
     if (
       createHash("sha256").update(content).digest("hex") !==

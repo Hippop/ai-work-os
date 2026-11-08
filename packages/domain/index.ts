@@ -12,6 +12,9 @@ export const TaskInput = z.object({
     .max(50),
   priority: z.enum(["low", "normal", "high"]).default("normal"),
   maxMinutes: z.number().int().min(1).max(120).default(30),
+  skillVersionIds: z.array(z.string().uuid()).max(20).default([]),
+  knowledgeVersionIds: z.array(z.string().uuid()).max(30).default([]),
+  workflowVersionId: z.string().uuid().nullable().default(null),
 });
 export type TaskData = z.infer<typeof TaskInput>;
 export type Task = TaskData & {
@@ -82,6 +85,8 @@ export const workflow = [
   ["deliver", "成果交付"],
 ] as const;
 export type Step = {
+  operation?: string;
+  dependsOn?: string[];
   id: string;
   key: string;
   title: string;

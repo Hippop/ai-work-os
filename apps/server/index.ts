@@ -20,6 +20,9 @@ if (!existsSync(tokenPath))
   writeFileSync(tokenPath, randomBytes(32).toString("hex"), { mode: 0o600 });
 const token = readFileSync(tokenPath, "utf8").trim();
 if (!token) throw new Error("访问令牌为空，请检查本机配置");
+const port = Number(process.env.AI_WORK_OS_PORT ?? 4310);
+if (!Number.isInteger(port) || port < 1024 || port > 65535)
+  throw new Error("无效的AI_WORK_OS_PORT");
 const store = new Store(join(dataDir, "state.db"));
 const runtime = probeCodex();
 const service = new WorkService(store, runtime);
@@ -31,11 +34,11 @@ const supervisor = new Supervisor(
 );
 supervisor.start();
 const server = createApp(store, token, service, dataDir).listen(
-  4310,
+  port,
   "127.0.0.1",
   () => {
     console.log(
-      `AI Work OS: http://127.0.0.1:4310\nData: ${dataDir}\nAccess token file: ${tokenPath}`,
+      `AI Work OS: http://127.0.0.1:${port}\nData: ${dataDir}\nAccess token file: ${tokenPath}`,
     );
   },
 );
