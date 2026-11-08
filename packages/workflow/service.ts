@@ -1,0 +1,362 @@
+import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { Store } from "../persistence/index.js";
+import {
+  TaskInput,
+  ProjectInput,
+  DomainError,
+  digest,
+  workflow,
+  terminal,
+  assertTransition,
+  type Task,
+  type Run,
+  type Project,
+} from "../domain/index.js";
+
+export class WorkService {
+  constructor(public store: Store) {}
+  required<T>(kind: string, id: string): T {
+    const item = this.store.get<T>(kind, id);
+    if (!item) throw new DomainError("not_found", "记录不存在", 404);
+    return item;
+  }
+  createTask(input: unknown): Task {
+    const data = TaskInput.parse(input);
+    if (data.projectId) this.required("project", data.projectId);
+    const now = new Date().toISOString();
+    const task: Task = {
+      ...data,
+      id: randomUUID(),
+      status: "inbox",
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.put("task", task);
+    return task;
+  }
+  createProject(input: unknown): Project {
+    const data = ProjectInput.parse(input);
+    let repositoryPath: string;
+    try {
+      repositoryPath = realpathSync(data.repositoryPath);
+      execFileSync(
+        "git",
+        ["-C", repositoryPath, "rev-parse", "--show-toplevel"],
+        { encoding: "utf8", stdio: "pipe", timeout: 10000 },
+      );
+    } catch {
+      throw new DomainError(
+        "invalid_repository",
+        "请选择已有 Git 仓库目录",
+        422,
+      );
+    }
+    const project = {
+      ...data,
+      repositoryPath,
+      id: randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    this.store.put("project", project);
+    return project;
+  }
+  updateTask(id: string, revision: number, input: unknown): Task {
+    return this.store.transaction(() => {
+      const task = this.required<Task>("task", id);
+      if (task.revision !== revision)
+        throw new DomainError("revision_conflict", "任务已改变，请刷新后重试");
+      if (
+        this.store
+          .list<Run>("run")
+          .some((r) => r.taskId === id && !terminal.has(r.status))
+      )
+        throw new DomainError(
+          "active_run",
+          "执行期间请先暂停并结束当前运行，再修改任务",
+        );
+      const data = TaskInput.parse(input);
+      if (data.projectId) this.required("project", data.projectId);
+      const updated = {
+        ...task,
+        ...data,
+        revision: revision + 1,
+        status: "planned",
+        updatedAt: new Date().toISOString(),
+      };
+      this.store.put("task", updated);
+      return updated;
+    });
+  }
+  prepare(id: string) {
+    const task = this.required<Task>("task", id);
+    const project = task.projectId
+      ? this.required<Project>("project", task.projectId)
+      : null;
+    const checks: { label: string; passed: boolean; detail: string }[] = [];
+    let baseCommit: string | null = null;
+    if (project) {
+      try {
+        baseCommit = execFileSync(
+          "git",
+          ["-C", project.repositoryPath, "rev-parse", "HEAD"],
+          { encoding: "utf8", timeout: 10000 },
+        ).trim();
+        checks.push({ label: "仓库基线", passed: true, detail: baseCommit });
+      } catch {
+        checks.push({
+          label: "仓库基线",
+          passed: false,
+          detail: "仓库需要至少一个提交",
+        });
+      }
+    }
+    checks.push({
+      label: "验收标准",
+      passed: task.acceptanceCriteria.length > 0,
+      detail: `${task.acceptanceCriteria.length} 项`,
+    });
+    checks.push({
+      label: "执行方式",
+      passed: task.type === "manual",
+      detail:
+        task.type === "manual"
+          ? "人工执行：提交成果后验收"
+          : "Agent Worker 接入尚在实现；当前禁止派发真实执行",
+    });
+    const manifest = {
+      taskId: id,
+      taskRevision: task.revision,
+      taskDigest: digest(task),
+      project,
+      baseCommit,
+      workflowVersion: "feature-development@1.0.0",
+      runtime: task.type === "manual" ? "manual" : "unavailable",
+    };
+    return {
+      manifest,
+      preparationDigest: digest(manifest),
+      checks,
+      ready: checks.every((c) => c.passed),
+    };
+  }
+  start(id: string, preparationDigest: string, key: string): Run {
+    if (!key || key.length > 200)
+      throw new DomainError(
+        "idempotency_required",
+        "需要有效的 Idempotency-Key",
+        422,
+      );
+    return this.store.transaction(() => {
+      const scope = `start:${id}`,
+        requestDigest = digest({ preparationDigest });
+      const cached = this.store.db
+        .prepare(
+          "SELECT digest,response FROM idempotency WHERE scope=? AND key=?",
+        )
+        .get(scope, key) as { digest: string; response: string } | undefined;
+      if (cached) {
+        if (cached.digest !== requestDigest)
+          throw new DomainError(
+            "idempotency_conflict",
+            "同一请求键不能用于不同内容",
+          );
+        return JSON.parse(cached.response);
+      }
+      const prepared = this.prepare(id);
+      if (prepared.preparationDigest !== preparationDigest)
+        throw new DomainError(
+          "stale_preparation",
+          "执行准备已过期，请重新检查",
+        );
+      if (!prepared.ready)
+        throw new DomainError("not_ready", "执行准备未通过", 422);
+      if (
+        this.store
+          .list<Run>("run")
+          .some((r) => r.taskId === id && !terminal.has(r.status))
+      )
+        throw new DomainError("active_run", "该任务已有活跃运行");
+      const task = this.required<Task>("task", id),
+        now = new Date().toISOString();
+      const run: Run = {
+        id: randomUUID(),
+        taskId: id,
+        taskRevision: task.revision,
+        status: "queued",
+        workflowVersion: prepared.manifest.workflowVersion,
+        steps:
+          task.type === "manual"
+            ? [
+                {
+                  id: randomUUID(),
+                  key: "manual",
+                  title: "人工执行与成果提交",
+                  status: "pending",
+                  attempts: 0,
+                },
+              ]
+            : workflow.map(([key, title]) => ({
+                id: randomUUID(),
+                key,
+                title,
+                status: "pending",
+                attempts: 0,
+              })),
+        createdAt: now,
+        updatedAt: now,
+        runtime: prepared.manifest.runtime,
+        manifest: prepared.manifest,
+      };
+      this.store.put("run", run);
+      this.store.put("task", {
+        ...task,
+        status: "in_progress",
+        updatedAt: now,
+      });
+      this.store.event(run.id, "run.created", { manifest: run.manifest });
+      this.store.db
+        .prepare("INSERT INTO outbox(id,run_id,created_at) VALUES(?,?,?)")
+        .run(randomUUID(), run.id, now);
+      if (run.runtime === "manual") {
+        this.transition(run.id, "preparing");
+        this.transition(run.id, "running");
+        this.store.db
+          .prepare("UPDATE outbox SET state='done' WHERE run_id=?")
+          .run(run.id);
+      }
+      const result = this.required<Run>("run", run.id);
+      this.store.db
+        .prepare("INSERT INTO idempotency VALUES(?,?,?,?)")
+        .run(scope, key, requestDigest, JSON.stringify(result));
+      return result;
+    });
+  }
+  transition(id: string, status: string) {
+    const run = this.required<Run>("run", id);
+    assertTransition(run.status, status);
+    const updated = {
+      ...run,
+      status,
+      steps:
+        run.runtime === "manual" &&
+        ["running", "paused", "cancelled"].includes(status)
+          ? run.steps.map((step) => ({ ...step, status }))
+          : run.steps,
+      updatedAt: new Date().toISOString(),
+    };
+    this.store.put("run", updated);
+    this.store.event(id, "run.status_changed", {
+      from: run.status,
+      to: status,
+    });
+    return updated;
+  }
+  control(id: string, action: string) {
+    return this.store.transaction(() => {
+      const run = this.required<Run>("run", id);
+      if (run.runtime !== "manual")
+        throw new DomainError(
+          "runtime_unavailable",
+          "需要 Worker 确认执行停止",
+        );
+      if (action === "pause") {
+        this.transition(id, "pausing");
+        return this.transition(id, "paused");
+      }
+      if (action === "resume") {
+        this.transition(id, "preparing");
+        return this.transition(id, "running");
+      }
+      if (action === "cancel") {
+        this.transition(id, "cancelling");
+        const result = this.transition(id, "cancelled");
+        const task = this.required<Task>("task", run.taskId);
+        this.store.put("task", { ...task, status: "planned" });
+        return result;
+      }
+      throw new DomainError("invalid_action", "未知操作", 422);
+    });
+  }
+  submit(id: string, summary: string) {
+    return this.store.transaction(() => {
+      const run = this.required<Run>("run", id);
+      if (run.status !== "running" || run.runtime !== "manual")
+        throw new DomainError(
+          "invalid_delivery",
+          "只有运行中的人工任务可提交人工成果",
+        );
+      if (!summary.trim() || summary.length > 30000)
+        throw new DomainError(
+          "invalid_delivery",
+          "请提供成果说明（最多30000字）",
+          422,
+        );
+      const delivery = {
+        id: randomUUID(),
+        runId: id,
+        taskRevision: run.taskRevision,
+        summary: summary.trim(),
+        createdAt: new Date().toISOString(),
+      };
+      this.store.put("delivery", delivery);
+      this.store.put("run", {
+        ...run,
+        steps: run.steps.map((s) => ({ ...s, status: "succeeded" })),
+      });
+      this.store.event(id, "delivery.submitted", delivery, "user");
+      this.transition(id, "succeeded");
+      const task = this.required<Task>("task", run.taskId);
+      this.store.put("task", { ...task, status: "awaiting_acceptance" });
+      return delivery;
+    });
+  }
+  accept(
+    taskId: string,
+    deliveryId: string,
+    accepted: boolean,
+    reason: string,
+  ) {
+    return this.store.transaction(() => {
+      const task = this.required<Task>("task", taskId),
+        delivery = this.required<{
+          id: string;
+          runId: string;
+          taskRevision: number;
+        }>("delivery", deliveryId),
+        run = this.required<Run>("run", delivery.runId);
+      if (
+        run.taskId !== taskId ||
+        task.revision !== delivery.taskRevision ||
+        task.status !== "awaiting_acceptance"
+      )
+        throw new DomainError("stale_delivery", "交付物不属于当前待验收版本");
+      if (!accepted && !reason.trim())
+        throw new DomainError("reason_required", "退回时请填写原因", 422);
+      this.store.put("acceptance", {
+        id: randomUUID(),
+        taskId,
+        deliveryId,
+        accepted,
+        reason,
+        createdAt: new Date().toISOString(),
+      });
+      const updated = {
+        ...task,
+        status: accepted ? "done" : "planned",
+        revision: accepted ? task.revision : task.revision + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      this.store.put("task", updated);
+      this.store.event(
+        run.id,
+        accepted ? "task.accepted" : "task.rejected",
+        { deliveryId, reason },
+        "user",
+      );
+      return updated;
+    });
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "name": "ai-work-os",
+  "version": "0.1.0",
+  "description": "面向个人程序员、支持多项目和多仓库的智能工作平台。",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch apps/server/index.ts",
+    "dev:web": "vite",
+    "start": "tsx apps/server/index.ts",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hippop/ai-work-os.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Hippop/ai-work-os/issues"
+  },
+  "homepage": "https://github.com/Hippop/ai-work-os#readme",
+  "dependencies": {
+    "express": "^5.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@types/supertest": "^6.0.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.5",
+    "prettier": "^3.9.10",
+    "supertest": "^7.3.2",
+    "tsx": "^4.23.15",
+    "typescript": "5.9",
+    "vite": "^7.3.7"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

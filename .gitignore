@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+coverage/
+*.db
+*.db-shm
+*.db-wal
+.runtime/
+test-results/
+playwright-report/
+.playwright-cli/
+output/playwright/
