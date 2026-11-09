@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import type { Job } from "./protocol.js";
 import { DiagnosisResult } from "../diagnosis/index.js";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 
 export const Result = z.object({
   summary: z.string().min(1),
@@ -11,6 +13,29 @@ export const Result = z.object({
   risks: z.array(z.string()),
 });
 export class UnconfirmedStop extends Error {}
+export function runtimeSettings() {
+  let content = "";
+  try {
+    content = readFileSync(
+      join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml"),
+      "utf8",
+    );
+  } catch {}
+  const root = content.split(/^\[/m)[0],
+    model =
+      process.env.AI_WORK_OS_CODEX_MODEL ??
+      root.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ??
+      null,
+    reasoning =
+      root.match(/^model_reasoning_effort\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+  return {
+    model,
+    reasoning,
+    configurationDigest: createHash("sha256")
+      .update(JSON.stringify({ content, model, reasoning }))
+      .digest("hex"),
+  };
+}
 export function probeCodex(command = process.env.AI_WORK_OS_CODEX ?? "codex") {
   const result = spawnSync(command, ["--version"], {
     encoding: "utf8",
@@ -21,6 +46,7 @@ export function probeCodex(command = process.env.AI_WORK_OS_CODEX ?? "codex") {
     id: "codex",
     available: result.status === 0,
     version: result.status === 0 ? result.stdout.trim() : null,
+    ...runtimeSettings(),
     capabilities: {
       jsonEvents: true,
       structuredOutput: true,
@@ -109,6 +135,13 @@ export async function runAgent(
   onChild: (child: ChildProcess | null) => void,
   operation = key,
 ) {
+  if (
+    job.runtimeConfigurationDigest &&
+    runtimeSettings().configurationDigest !== job.runtimeConfigurationDigest
+  )
+    throw new Error(
+      "Runtime configuration changed after input snapshot; reprepare the task",
+    );
   const schemaPath = join(job.outputDir, "result.schema.json"),
     resultPath = join(job.outputDir, `${key}.json`);
   const diagnostic = job.taskType === "diagnosis" && operation === "conclude";
@@ -147,6 +180,10 @@ export async function runAgent(
   const args = [
     ...job.commandPrefix,
     "exec",
+    ...(job.model ? ["--model", job.model] : []),
+    ...(job.modelReasoning
+      ? ["-c", `model_reasoning_effort=${JSON.stringify(job.modelReasoning)}`]
+      : []),
     "--json",
     "--sandbox",
     operation === "implement" ? "workspace-write" : "read-only",

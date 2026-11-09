@@ -7,6 +7,7 @@ import { createApp } from "./app.js";
 import { Supervisor } from "../../packages/runtime/supervisor.js";
 import { probeCodex } from "../../packages/runtime/adapter.js";
 import { WorkService } from "../../packages/workflow/service.js";
+import { OptimizationService } from "../../packages/optimization/index.js";
 
 const dataDir =
   process.env.AI_WORK_OS_DATA_DIR ??
@@ -33,6 +34,14 @@ const supervisor = new Supervisor(
   process.env.AI_WORK_OS_CODEX ?? "codex",
 );
 supervisor.start();
+const optimization = new OptimizationService(store, dataDir, runtime);
+const optimizationTimer = setInterval(() => {
+  try {
+    optimization.tick();
+  } catch (error) {
+    console.error("Optimization scheduler error", error);
+  }
+}, 30000);
 const server = createApp(store, token, service, dataDir).listen(
   port,
   "127.0.0.1",
@@ -45,6 +54,7 @@ const server = createApp(store, token, service, dataDir).listen(
 for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () =>
     server.close(() => {
+      clearInterval(optimizationTimer);
       void supervisor.close().then(() => {
         store.close();
         process.exit(0);

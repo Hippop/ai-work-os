@@ -7,6 +7,9 @@ import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import { PlanningService } from "../../packages/planning/index.js";
 import { DiagnosisService } from "../../packages/diagnosis/index.js";
+import { OptimizationService } from "../../packages/optimization/index.js";
+import { RolloutService } from "../../packages/optimization/rollout.js";
+import { probeCodex } from "../../packages/runtime/adapter.js";
 import {
   ResourceService,
   defaultPlan,
@@ -15,6 +18,7 @@ import {
   DomainError,
   type Run,
   type Task,
+  digest,
 } from "../../packages/domain/index.js";
 
 export function createApp(
@@ -27,6 +31,8 @@ export function createApp(
   const resources = new ResourceService(store);
   const planning = new PlanningService(store),
     diagnosis = new DiagnosisService(store);
+  const optimization = new OptimizationService(store, dataDir, service.runtime);
+  const rollouts = new RolloutService(optimization);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "128kb" }));
   app.use("/api", (req, res, next) => {
@@ -61,7 +67,116 @@ export function createApp(
   app.get("/api/v1/health", (_req, res) =>
     res.json({ status: "ok", schemaVersion: 1 }),
   );
+  app.get("/api/v1/runtimes", (_req, res) =>
+    res.json([{ id: "codex", ...service.runtime }]),
+  );
+  app.post("/api/v1/runtimes/probe", (_req, res) => {
+    Object.assign(service.runtime, probeCodex());
+    res.json([{ id: "codex", ...service.runtime }]);
+  });
   app.get("/api/v1/tasks", (_req, res) => res.json(store.list("task")));
+  app.get("/api/v1/optimization", (_req, res) =>
+    res.json({
+      proposals: store.list("improvement"),
+      datasets: store.list("evaluation_dataset"),
+      trials: store.list("evaluation_trial"),
+      evaluations: store.list("evaluation"),
+      releases: store.list("improvement_release"),
+      rollbacks: store.list("improvement_rollback"),
+      analyses: store.list("analysis_batch"),
+      schedule: store.get("optimization_schedule", "periodic_analysis"),
+      policy: store.get("optimization_policy", "auto_low_risk"),
+      notices: store.list("optimization_notice"),
+      projects: store.list("project"),
+      canaries: store
+        .list<any>("resource_canary")
+        .map((canary) => ({ ...canary, ...rollouts.inspect(canary) })),
+      canaryHistory: store.list("canary_history"),
+    }),
+  );
+  app.post("/api/v1/optimization/analyze", (req, res) => {
+    const b = z
+      .object({ from: z.iso.datetime(), to: z.iso.datetime() })
+      .parse(req.body);
+    res.json(optimization.analyze(b.from, b.to));
+  });
+  app.post("/api/v1/optimization/proposals", (req, res) =>
+    res.status(201).json(optimization.propose(req.body)),
+  );
+  app.post("/api/v1/optimization/candidates", (req, res) => {
+    const b = z
+      .object({
+        baselineId: z.string().uuid(),
+        evidenceRunIds: z.array(z.string().uuid()).min(1),
+      })
+      .parse(req.body);
+    res
+      .status(201)
+      .json(optimization.generateCandidate(b.baselineId, b.evidenceRunIds));
+  });
+  app.post("/api/v1/optimization/datasets", (req, res) =>
+    res.status(201).json(optimization.dataset(req.body)),
+  );
+  app.post("/api/v1/optimization/proposals/:id/trials", (req, res) =>
+    res.status(202).json(optimization.trials(req.params.id, req.body)),
+  );
+  app.post("/api/v1/optimization/proposals/:id/evaluations", (req, res) =>
+    res.status(201).json(optimization.evaluate(req.params.id, req.body)),
+  );
+  app.post("/api/v1/optimization/proposals/:id/releases", (req, res) =>
+    res.status(201).json(optimization.release(req.params.id, req.body)),
+  );
+  app.post("/api/v1/optimization/releases/:id/rollback", (req, res) =>
+    res.json(
+      optimization.rollback(
+        req.params.id,
+        z.object({ reason: z.string().min(1).max(10000) }).parse(req.body)
+          .reason,
+      ),
+    ),
+  );
+  app.post("/api/v1/optimization/schedule", (req, res) =>
+    res.json(optimization.configureSchedule(req.body)),
+  );
+  app.post("/api/v1/optimization/policy", (req, res) => {
+    const data = z
+      .object({
+        enabled: z.boolean(),
+        approvalReason: z.string().min(1).max(10000),
+        projectIds: z.array(z.string().uuid()).max(20).default([]),
+      })
+      .parse(req.body);
+    if (data.enabled && !data.projectIds.length)
+      throw new DomainError(
+        "project_scope_required",
+        "启用自动灰度需要选定项目",
+        422,
+      );
+    for (const id of data.projectIds) service.required("project", id);
+    const policy = {
+      id: "auto_low_risk",
+      ...data,
+      updatedAt: new Date().toISOString(),
+    };
+    store.put("optimization_policy", policy);
+    rollouts.tick();
+    res.json(policy);
+  });
+  app.post("/api/v1/optimization/proposals/:id/canaries", (req, res) =>
+    res.status(201).json(rollouts.start(req.params.id, req.body)),
+  );
+  app.post("/api/v1/optimization/canaries/:id/promote", (req, res) =>
+    res.json(rollouts.promote(req.params.id, req.body)),
+  );
+  app.post("/api/v1/optimization/canaries/:id/stop", (req, res) => {
+    const data = z
+      .object({
+        rolloutId: z.string().uuid(),
+        reason: z.string().min(1).max(10000),
+      })
+      .parse(req.body);
+    res.json(rollouts.stop(req.params.id, data.rolloutId, data.reason));
+  });
   app.get("/api/v1/goals", (_req, res) => res.json(planning.goals()));
   app.post("/api/v1/goals", (req, res) =>
     res.status(201).json(planning.createGoal(req.body)),
@@ -97,17 +212,48 @@ export function createApp(
   app.post("/api/v1/tasks/:id/diagnosis/hypotheses", (req, res) =>
     res.status(201).json(diagnosis.addHypothesis(req.params.id, req.body)),
   );
-  app.post('/api/v1/tasks/:id/diagnosis/hypotheses/:hypothesisId',(req,res)=>{const body=z.object({revision:z.number().int().positive(),changes:z.record(z.string(),z.unknown())}).parse(req.body);res.json(diagnosis.updateHypothesis(req.params.id,req.params.hypothesisId,body.revision,body.changes));});
+  app.post(
+    "/api/v1/tasks/:id/diagnosis/hypotheses/:hypothesisId",
+    (req, res) => {
+      const body = z
+        .object({
+          revision: z.number().int().positive(),
+          changes: z.record(z.string(), z.unknown()),
+        })
+        .parse(req.body);
+      res.json(
+        diagnosis.updateHypothesis(
+          req.params.id,
+          req.params.hypothesisId,
+          body.revision,
+          body.changes,
+        ),
+      );
+    },
+  );
   app.post("/api/v1/tasks/:id/diagnosis/reports", (req, res) =>
     res.status(201).json(diagnosis.report(req.params.id, req.body)),
   );
   app.get("/api/v1/resources", (_req, res) =>
     res.json(
-      store.list<{ id: string }>("resource").map((resource) => ({
-        ...resource,
-        status: store.get<{ state: string }>("resource_status", resource.id)
-          ?.state,
-      })),
+      store
+        .list<{
+          id: string;
+          kind: string;
+          name: string;
+          projectId: string | null;
+        }>("resource")
+        .map((resource) => ({
+          ...resource,
+          status: store.get<{ state: string }>("resource_status", resource.id)
+            ?.state,
+          familyId: digest([resource.kind, resource.name, resource.projectId]),
+          current:
+            store.get<{ resourceId: string }>(
+              "resource_release",
+              digest([resource.kind, resource.name, resource.projectId]),
+            )?.resourceId === resource.id,
+        })),
     ),
   );
   app.get("/api/v1/capabilities", (_req, res) => res.json(defaultPlan));

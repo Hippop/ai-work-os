@@ -173,6 +173,10 @@ export class Supervisor {
         criteria: task.acceptanceCriteria,
         testCommand: project.testCommand!,
         deadline,
+        model: run.manifest.model as Job["model"],
+        modelReasoning: run.manifest.modelReasoning as Job["modelReasoning"],
+        runtimeConfigurationDigest: run.manifest
+          .runtimeConfigurationDigest as Job["runtimeConfigurationDigest"],
         completed,
         context: run.manifest.context,
         plan:

@@ -6,6 +6,7 @@ import type { Event } from "../domain/index.js";
 
 export class Store {
   db: DatabaseSync;
+  private depth = 0;
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -26,14 +27,24 @@ export class Store {
       PRAGMA user_version=1;`);
   }
   transaction<T>(fn: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    const nested = this.depth > 0,
+      savepoint = `nested_${this.depth}`;
+    this.db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
+    this.depth++;
     try {
       const result = fn();
-      this.db.exec("COMMIT");
+      if (result instanceof Promise)
+        throw new Error("Database transactions must be synchronous");
+      this.db.exec(nested ? `RELEASE SAVEPOINT ${savepoint}` : "COMMIT");
       return result;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      if (nested) {
+        this.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      } else this.db.exec("ROLLBACK");
       throw error;
+    } finally {
+      this.depth--;
     }
   }
   get<T>(kind: string, id: string): T | undefined {

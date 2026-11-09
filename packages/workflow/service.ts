@@ -22,9 +22,21 @@ import {
 export class WorkService {
   constructor(
     public store: Store,
-    public runtime: { available: boolean; version: string | null } = {
+    public runtime: {
+      available: boolean;
+      version: string | null;
+      model?: string | null;
+      reasoning?: string | null;
+      configurationDigest?: string;
+    } = {
       available: false,
       version: null,
+    },
+    public evaluationOptions?: {
+      candidateIds: string[];
+      evaluation: { trialId: string; caseId: string; arm: string };
+      projectSnapshot: Project;
+      baseCommit: string;
     },
   ) {}
   required<T>(kind: string, id: string): T {
@@ -117,9 +129,11 @@ export class WorkService {
   prepare(id: string) {
     const saved = this.required<Task>("task", id);
     const task = { ...saved, ...TaskInput.parse(saved) };
-    const project = task.projectId
-      ? this.required<Project>("project", task.projectId)
-      : null;
+    const project =
+      this.evaluationOptions?.projectSnapshot ??
+      (task.projectId
+        ? this.required<Project>("project", task.projectId)
+        : null);
     const checks: { label: string; passed: boolean; detail: string }[] = [];
     checks.push({
       label: "任务状态",
@@ -145,7 +159,13 @@ export class WorkService {
       try {
         baseCommit = execFileSync(
           "git",
-          ["-C", project.repositoryPath, "rev-parse", "HEAD"],
+          [
+            "-C",
+            project.repositoryPath,
+            "rev-parse",
+            "--verify",
+            this.evaluationOptions?.baseCommit ?? "HEAD",
+          ],
           { encoding: "utf8", timeout: 10000 },
         ).trim();
         checks.push({ label: "仓库基线", passed: true, detail: baseCommit });
@@ -179,18 +199,41 @@ export class WorkService {
               : "需要开发任务、仓库授权和可执行测试命令"
             : "Codex未检测到，不能派发真实执行",
     });
-    const context = new ResourceService(this.store).context(
+    const context = new ResourceService(
+      this.store,
+      this.evaluationOptions?.candidateIds,
+    ).context(
       task.skillVersionIds,
       task.knowledgeVersionIds,
       task.workflowVersionId,
       task.projectId,
       task.type === "diagnosis" ? "diagnosis" : "development",
+      task.resourceFamilyIds,
+      {
+        taskId: task.id,
+        runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
+      },
     );
+    if (context.canaryBindings.length)
+      checks.push({
+        label: "灰度资源",
+        passed: true,
+        detail: context.canaryBindings
+          .map((binding) => {
+            const resource = this.required<{ name: string; version: string }>(
+              "resource",
+              binding.candidateId,
+            );
+            return `${resource.name} @${resource.version}`;
+          })
+          .join("；"),
+      });
     const manifest = {
       taskId: id,
       taskRevision: task.revision,
       taskDigest: digest(task),
       task,
+      evaluation: this.evaluationOptions?.evaluation ?? null,
       diagnosis:
         task.type === "diagnosis"
           ? new DiagnosisService(this.store).snapshot(task.id)
@@ -198,6 +241,14 @@ export class WorkService {
       context,
       planRevision: 1,
       runtimeVersion: this.runtime.version,
+      model: this.runtime.model ?? null,
+      modelReasoning: this.runtime.reasoning ?? null,
+      runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
+      environment: {
+        platform: process.platform,
+        architecture: process.arch,
+        node: process.version,
+      },
       project,
       baseCommit,
       workflowVersion: context.workflow
@@ -250,6 +301,19 @@ export class WorkService {
         );
       if (!prepared.ready)
         throw new DomainError("not_ready", "执行准备未通过", 422);
+      for (const binding of prepared.manifest.context.canaryBindings) {
+        const canary = this.required<any>("resource_canary", binding.id);
+        if (canary.rolloutId !== binding.rolloutId)
+          throw new DomainError("canary_changed", "灰度版本已变化");
+        if (!canary.selectedTaskIds.includes(id)) {
+          if (canary.selectedTaskIds.length >= canary.maxTasks)
+            throw new DomainError("canary_full", "灰度名额已变化，请重新准备");
+          this.store.put("resource_canary", {
+            ...canary,
+            selectedTaskIds: [...canary.selectedTaskIds, id],
+          });
+        }
+      }
       if (
         this.store
           .list<Run>("run")
@@ -329,6 +393,25 @@ export class WorkService {
       updatedAt: new Date().toISOString(),
     };
     this.store.put("run", updated);
+    if (status === "failed") {
+      const task = this.store.get<Task>("task", run.taskId);
+      if (task?.status === "in_progress")
+        this.store.put("task", {
+          ...task,
+          status: "blocked",
+          blockedReason: "运行失败；请查看执行记录并重新准备",
+          updatedAt: new Date().toISOString(),
+        });
+    }
+    if (status === "failed")
+      for (const binding of (
+        run.manifest.context as { canaryBindings?: { rolloutId: string }[] }
+      )?.canaryBindings ?? [])
+        this.store.put("canary_alert", {
+          id: binding.rolloutId,
+          runId: id,
+          at: new Date().toISOString(),
+        });
     this.store.event(id, "run.status_changed", {
       from: run.status,
       to: status,
@@ -339,10 +422,27 @@ export class WorkService {
     return this.store.transaction(() => {
       const run = this.required<Run>("run", id);
       if (run.runtime !== "manual") {
+        if (action === "cancel" && run.status === "queued") {
+          this.transition(id, "cancelling");
+          const result = this.transition(id, "cancelled");
+          const task = this.required<Task>("task", run.taskId);
+          this.store.put("task", { ...task, status: "planned" });
+          return result;
+        }
         if (action === "pause") return this.transition(id, "pausing");
         if (action === "cancel") return this.transition(id, "cancelling");
         if (action === "resume" && run.status === "paused") {
           const frozenTask = run.manifest.task as Task;
+          const frozenContext = run.manifest.context as {
+            skills: { id: string }[];
+            knowledge: { id: string }[];
+            workflow: { id: string } | null;
+            canaryBindings?: {
+              id: string;
+              candidateId: string;
+              rolloutId: string;
+            }[];
+          };
           if (
             (frozenTask.dependsOn ?? []).some(
               (id) => this.store.get<Task>("task", id)?.status !== "done",
@@ -352,10 +452,40 @@ export class WorkService {
               "dependency_incomplete",
               "前置任务需要先完成验收",
             );
-          new ResourceService(this.store).context(
-            frozenTask.skillVersionIds ?? [],
-            frozenTask.knowledgeVersionIds ?? [],
-            frozenTask.workflowVersionId ?? null,
+          new ResourceService(
+            this.store,
+            run.manifest.evaluation
+              ? [
+                  ...frozenTask.skillVersionIds,
+                  ...frozenTask.knowledgeVersionIds,
+                  ...(frozenTask.workflowVersionId
+                    ? [frozenTask.workflowVersionId]
+                    : []),
+                ]
+              : (frozenContext.canaryBindings ?? [])
+                  .filter((binding) => {
+                    const current = this.store.get<any>(
+                        "resource_canary",
+                        binding.id,
+                      ),
+                      history = this.store
+                        .list<any>("canary_history")
+                        .find(
+                          (h) =>
+                            h.rolloutId === binding.rolloutId &&
+                            h.selectedTaskIds?.includes(run.taskId),
+                        );
+                    return (
+                      (current?.rolloutId === binding.rolloutId &&
+                        current.selectedTaskIds.includes(run.taskId)) ||
+                      history
+                    );
+                  })
+                  .map((binding) => binding.candidateId),
+          ).context(
+            frozenContext.skills.map((r) => r.id),
+            frozenContext.knowledge.map((r) => r.id),
+            frozenContext.workflow?.id ?? null,
             frozenTask.projectId,
             frozenTask.type === "diagnosis" ? "diagnosis" : "development",
           );

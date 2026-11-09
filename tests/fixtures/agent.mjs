@@ -37,7 +37,12 @@ else {
     process.exit(0);
   }
   if (prompt.includes("Step: implement."))
-    writeFileSync(join(workspace, "answer.txt"), "42");
+    writeFileSync(
+      join(workspace, "answer.txt"),
+      prompt.includes("FAIL_BASELINE") && !prompt.includes("执行改进候选")
+        ? "41"
+        : "42",
+    );
   writeFileSync(
     result,
     JSON.stringify({

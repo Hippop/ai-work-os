@@ -10,6 +10,9 @@ export type Job = {
   criteria: string[];
   testCommand: TestCommand;
   deadline: number;
+  model?: string | null;
+  modelReasoning?: string | null;
+  runtimeConfigurationDigest?: string | null;
   plan?: import("../resources/index.js").PlanNode[];
   context?: unknown;
   completed?: Record<string, unknown>;

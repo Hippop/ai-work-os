@@ -154,7 +154,10 @@ export type ResourceVersion = z.infer<typeof VersionInput> & {
   createdAt: string;
 };
 export class ResourceService {
-  constructor(public store: Store) {}
+  constructor(
+    public store: Store,
+    public candidateIds: string[] = [],
+  ) {}
   create(input: unknown) {
     const data = VersionInput.parse(input);
     if (data.projectId && !this.store.get("project", data.projectId))
@@ -192,10 +195,41 @@ export class ResourceService {
       return resource;
     });
   }
-  publish(id: string) {
+  publish(
+    id: string,
+    proof?: { evaluationId?: string; rollbackReleaseId?: string },
+  ) {
     return this.store.transaction(() => {
       const resource = this.store.get<ResourceVersion>("resource", id);
       if (!resource) throw new DomainError("not_found", "资源不存在", 404);
+      const proposals = this.store
+        .list<{ id: string; candidateId: string }>("improvement")
+        .filter((p) => p.candidateId === id);
+      if (proposals.length) {
+        const evaluation = proof?.evaluationId
+          ? this.store.get<{ proposalId: string; result: { gate: string } }>(
+              "evaluation",
+              proof.evaluationId,
+            )
+          : null;
+        const rollback = proof?.rollbackReleaseId
+          ? this.store.get<{ previousResourceId: string }>(
+              "improvement_release",
+              proof.rollbackReleaseId,
+            )
+          : null;
+        if (
+          !(
+            evaluation?.result.gate === "passed" &&
+            proposals.some((p) => p.id === evaluation.proposalId)
+          ) &&
+          rollback?.previousResourceId !== id
+        )
+          throw new DomainError(
+            "evaluation_required",
+            "优化候选须通过评估与发布流程",
+          );
+      }
       if (
         this.store.get<{ state: string }>("resource_status", id)?.state ===
         "revoked"
@@ -217,6 +251,11 @@ export class ResourceService {
     this.store.transaction(() => {
       this.store.put("resource_status", { id, state: "revoked" });
       for (const run of this.store.list<Run>("run")) {
+        const frozenContext = run.manifest.context as {
+          skills?: ResourceVersion[];
+          knowledge?: ResourceVersion[];
+          workflow?: ResourceVersion;
+        };
         const task = run.manifest.task as {
           skillVersionIds?: string[];
           knowledgeVersionIds?: string[];
@@ -227,6 +266,11 @@ export class ResourceService {
             ...(task?.skillVersionIds ?? []),
             ...(task?.knowledgeVersionIds ?? []),
             task?.workflowVersionId,
+            ...[
+              ...(frozenContext?.skills ?? []),
+              ...(frozenContext?.knowledge ?? []),
+              ...(frozenContext?.workflow ? [frozenContext.workflow] : []),
+            ].map((r) => r.id),
           ].includes(id)
         )
           continue;
@@ -273,7 +317,12 @@ export class ResourceService {
         );
       if (
         this.store.get<{ state: string }>("resource_status", id)?.state !==
-        "published"
+          "published" &&
+        !(
+          this.candidateIds.includes(id) &&
+          this.store.get<{ state: string }>("resource_status", id)?.state ===
+            "candidate"
+        )
       )
         throw new DomainError(
           "resource_unpublished",
@@ -289,11 +338,72 @@ export class ResourceService {
     workflowId: string | null,
     projectId: string | null,
     taskType = "development",
+    familyIds: string[] = [],
+    rollout?: { taskId: string; runtimeConfigurationDigest?: string | null },
   ) {
-    const skills = this.resolve(skillIds, "skill", projectId),
-      knowledge = this.resolve(knowledgeIds, "knowledge", projectId),
+    const canaryBindings: {
+      id: string;
+      candidateId: string;
+      rolloutId: string;
+    }[] = [];
+    const active = familyIds.map((id) => {
+      const pointer = this.store.get<{ resourceId: string }>(
+        "resource_release",
+        id,
+      );
+      if (!pointer)
+        throw new DomainError("release_not_found", "资源发布指针不存在", 422);
+      const canary = this.store.get<any>("resource_canary", id);
+      if (
+        rollout &&
+        canary?.status === "active" &&
+        !this.store.get("canary_alert", canary.rolloutId) &&
+        canary.baselineId === pointer.resourceId &&
+        canary.projectIds.includes(projectId) &&
+        canary.runtimeConfigurationDigest ===
+          (rollout.runtimeConfigurationDigest ?? null) &&
+        (canary.selectedTaskIds.includes(rollout.taskId) ||
+          canary.selectedTaskIds.length < canary.maxTasks) &&
+        this.store.get<{ state: string }>("resource_status", canary.candidateId)
+          ?.state !== "revoked"
+      ) {
+        canaryBindings.push({
+          id,
+          candidateId: canary.candidateId,
+          rolloutId: canary.rolloutId,
+        });
+        return this.store.get<ResourceVersion>("resource", canary.candidateId)!;
+      }
+      return this.store.get<ResourceVersion>("resource", pointer.resourceId)!;
+    });
+    if (
+      active.filter((r) => r.kind === "workflow").length +
+        (workflowId ? 1 : 0) >
+      1
+    )
+      throw new DomainError(
+        "workflow_conflict",
+        "只能选择一个工作流版本或发布绑定",
+        422,
+      );
+    skillIds = [
+      ...skillIds,
+      ...active.filter((r) => r.kind === "skill").map((r) => r.id),
+    ];
+    knowledgeIds = [
+      ...knowledgeIds,
+      ...active.filter((r) => r.kind === "knowledge").map((r) => r.id),
+    ];
+    workflowId =
+      workflowId ?? active.find((r) => r.kind === "workflow")?.id ?? null;
+    const resolver = new ResourceService(this.store, [
+      ...this.candidateIds,
+      ...canaryBindings.map((c) => c.candidateId),
+    ]);
+    const skills = resolver.resolve(skillIds, "skill", projectId),
+      knowledge = resolver.resolve(knowledgeIds, "knowledge", projectId),
       template = workflowId
-        ? this.resolve([workflowId], "workflow", projectId)[0]
+        ? resolver.resolve([workflowId], "workflow", projectId)[0]
         : null;
     if (template && (template.taskType ?? "development") !== taskType)
       throw new DomainError("workflow_type", "模板与任务类型不匹配", 422);
@@ -301,12 +411,20 @@ export class ResourceService {
       skills,
       knowledge,
       workflow: template,
+      canaryBindings,
       plan: template
         ? validatePlan(template.nodes, taskType)
         : taskType === "diagnosis"
           ? diagnosisPlan
           : defaultPlan,
     };
+    const keys = [...skills, ...knowledge].map((r) => `${r.kind}:${r.name}`);
+    if (new Set(keys).size !== keys.length)
+      throw new DomainError(
+        "resource_conflict",
+        "同名资源版本冲突，请选择唯一版本",
+        422,
+      );
     if (JSON.stringify(result).length > 80000)
       throw new DomainError(
         "context_budget",

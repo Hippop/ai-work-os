@@ -15,6 +15,10 @@ export const TaskInput = z.object({
   skillVersionIds: z.array(z.string().uuid()).max(20).default([]),
   knowledgeVersionIds: z.array(z.string().uuid()).max(30).default([]),
   workflowVersionId: z.string().uuid().nullable().default(null),
+  resourceFamilyIds: z
+    .array(z.string().regex(/^[a-f0-9]{64}$/))
+    .max(30)
+    .default([]),
   parentId: z.string().uuid().nullable().default(null),
   goalId: z.string().uuid().nullable().default(null),
   dependsOn: z.array(z.string().uuid()).max(100).default([]),

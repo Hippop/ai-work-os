@@ -6,6 +6,8 @@ import { ResourceManager } from "./ResourceManager";
 import { PlanEditor } from "./PlanEditor";
 import { PlanningBoard } from "./PlanningBoard";
 import { DiagnosisBoard } from "./DiagnosisBoard";
+import { OptimizationBoard } from "./OptimizationBoard";
+import { RuntimeStatus } from "./RuntimeStatus";
 
 const labels: Record<string, string> = {
   inbox: "收件箱",
@@ -21,6 +23,7 @@ const labels: Record<string, string> = {
   cancelled: "已取消",
   failed: "失败",
   pending: "待执行",
+  blocked: "受阻",
 };
 type Delivery = {
   artifacts?: string[];
@@ -47,6 +50,8 @@ function App() {
         version: string;
         kind: string;
         status: string;
+        familyId: string;
+        current: boolean;
       }[]
     >([]);
   const [selected, setSelected] = useState<string>(),
@@ -148,9 +153,24 @@ function App() {
         type: form.get("type"),
         priority: form.get("priority"),
         projectId: form.get("projectId") || null,
-        skillVersionIds: form.getAll("skillVersionIds"),
-        knowledgeVersionIds: form.getAll("knowledgeVersionIds"),
-        workflowVersionId: form.get("workflowVersionId") || null,
+        skillVersionIds: form
+          .getAll("skillVersionIds")
+          .filter((v) => !String(v).startsWith("active:")),
+        knowledgeVersionIds: form
+          .getAll("knowledgeVersionIds")
+          .filter((v) => !String(v).startsWith("active:")),
+        workflowVersionId: String(form.get("workflowVersionId")).startsWith(
+          "active:",
+        )
+          ? null
+          : form.get("workflowVersionId") || null,
+        resourceFamilyIds: [
+          ...form.getAll("skillVersionIds"),
+          ...form.getAll("knowledgeVersionIds"),
+          form.get("workflowVersionId"),
+        ]
+          .filter((v) => String(v).startsWith("active:"))
+          .map((v) => String(v).slice(7)),
         acceptanceCriteria: String(form.get("criteria"))
           .split("\n")
           .map((s) => s.trim())
@@ -632,38 +652,12 @@ function App() {
             </div>
           )}
           {page === "优化中心" && (
-            <>
-              <div className="stats">
-                {[
-                  ["运行样本", runs.length],
-                  [
-                    "交付就绪",
-                    runs.filter((r) => r.status === "succeeded").length,
-                  ],
-                  [
-                    "已验收任务",
-                    tasks.filter((t) => t.status === "done").length,
-                  ],
-                  [
-                    "执行失败",
-                    runs.filter((r) => r.status === "failed").length,
-                  ],
-                ].map(([name, n]) => (
-                  <article key={name}>
-                    <span>{name}</span>
-                    <strong>{n}</strong>
-                    <small>来自当前工作空间</small>
-                  </article>
-                ))}
-              </div>
-              <div className="panel empty">
-                <h3>先积累执行证据，再验证改进</h3>
-                <p>
-                  当前提供真实任务统计。轨迹分析、候选评估、灰度发布与回滚正在按设计稿实现。
-                </p>
-                <span className="badge">尚无优化评估</span>
-              </div>
-            </>
+            <OptimizationBoard
+              api={api}
+              act={act}
+              runs={runs}
+              refresh={refresh}
+            />
           )}
           {page === "能力与知识" && <ResourceManager api={api} act={act} />}
           {page === "目标与计划" && (
@@ -699,6 +693,7 @@ function App() {
                 />
               </div>
             )}
+          {page === "项目与仓库" && <RuntimeStatus api={api} act={act} />}
           {page === "项目与仓库" && (
             <div className="panel">
               <h2>添加项目</h2>
@@ -848,7 +843,22 @@ function App() {
               <label>
                 工作流版本
                 <select name="workflowVersionId">
-                  <option value="">标准开发流程</option>
+                  <option value="">按任务类型选择标准流程</option>
+                  {resources
+                    .filter(
+                      (r) =>
+                        r.kind === "workflow" &&
+                        r.current &&
+                        r.status === "published",
+                    )
+                    .map((r) => (
+                      <option
+                        key={"active:" + r.familyId}
+                        value={"active:" + r.familyId}
+                      >
+                        跟随发布模板：{r.name}（当前 {r.version}）
+                      </option>
+                    ))}
                   {resources
                     .filter(
                       (r) => r.kind === "workflow" && r.status === "published",
@@ -871,6 +881,21 @@ function App() {
                     }
                     multiple
                   >
+                    {resources
+                      .filter(
+                        (r) =>
+                          r.kind === kind &&
+                          r.current &&
+                          r.status === "published",
+                      )
+                      .map((r) => (
+                        <option
+                          key={"active:" + r.familyId}
+                          value={"active:" + r.familyId}
+                        >
+                          跟随发布版本：{r.name}（当前 {r.version}）
+                        </option>
+                      ))}
                     {resources
                       .filter(
                         (r) => r.kind === kind && r.status === "published",
