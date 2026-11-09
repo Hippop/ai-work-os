@@ -8,6 +8,7 @@ import { Supervisor } from "../../packages/runtime/supervisor.js";
 import { probeCodex } from "../../packages/runtime/adapter.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import { OptimizationService } from "../../packages/optimization/index.js";
+import { acquireController } from "../../packages/runtime/recovery.js";
 
 const dataDir =
   process.env.AI_WORK_OS_DATA_DIR ??
@@ -25,6 +26,7 @@ const port = Number(process.env.AI_WORK_OS_PORT ?? 4310);
 if (!Number.isInteger(port) || port < 1024 || port > 65535)
   throw new Error("无效的AI_WORK_OS_PORT");
 const store = new Store(join(dataDir, "state.db"));
+const releaseController = acquireController(store);
 const runtime = probeCodex();
 const service = new WorkService(store, runtime);
 const supervisor = new Supervisor(
@@ -55,9 +57,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () =>
     server.close(() => {
       clearInterval(optimizationTimer);
-      void supervisor.close().then(() => {
-        store.close();
-        process.exit(0);
-      });
+      void supervisor
+        .close()
+        .then(() => {
+          releaseController();
+          store.close();
+          process.exit(0);
+        })
+        .catch((error) => {
+          console.error(
+            "Shutdown could not confirm all writers stopped",
+            error,
+          );
+          process.exit(2);
+        });
     }),
   );

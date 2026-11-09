@@ -11,6 +11,10 @@ import { OptimizationService } from "../../packages/optimization/index.js";
 import { RolloutService } from "../../packages/optimization/rollout.js";
 import { probeCodex } from "../../packages/runtime/adapter.js";
 import {
+  inspectRecovery,
+  reconcileManually,
+} from "../../packages/runtime/recovery.js";
+import {
   ResourceService,
   defaultPlan,
 } from "../../packages/resources/index.js";
@@ -318,6 +322,12 @@ export function createApp(
   app.get("/api/v1/runs", (_req, res) => res.json(store.list("run")));
   app.get("/api/v1/runs/:id", (req, res) =>
     res.json(service.required("run", req.params.id)),
+  );
+  app.get("/api/v1/runs/:id/recovery", (req, res) =>
+    res.json(inspectRecovery(store, service, req.params.id)),
+  );
+  app.post("/api/v1/runs/:id/recovery", (req, res) =>
+    res.json(reconcileManually(store, service, req.params.id, req.body)),
   );
   for (const action of ["pause", "resume", "cancel"])
     app.post(`/api/v1/runs/:id/${action}`, (req, res) =>

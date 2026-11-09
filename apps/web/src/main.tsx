@@ -8,6 +8,7 @@ import { PlanningBoard } from "./PlanningBoard";
 import { DiagnosisBoard } from "./DiagnosisBoard";
 import { OptimizationBoard } from "./OptimizationBoard";
 import { RuntimeStatus } from "./RuntimeStatus";
+import { RecoveryPanel } from "./RecoveryPanel";
 
 const labels: Record<string, string> = {
   inbox: "收件箱",
@@ -24,6 +25,10 @@ const labels: Record<string, string> = {
   failed: "失败",
   pending: "待执行",
   blocked: "受阻",
+  reconciling: "待核对",
+  preparing: "准备中",
+  pausing: "正在暂停",
+  cancelling: "正在取消",
 };
 type Delivery = {
   artifacts?: string[];
@@ -545,6 +550,19 @@ function App() {
                           </label>
                           <button disabled={busy}>提交成果，进入验收</button>
                         </form>
+                      )}
+                    {["reconciling", "cancelling"].includes(
+                      currentRun.status,
+                    ) &&
+                      currentRun.runtime !== "manual" && (
+                        <RecoveryPanel
+                          key={currentRun.id}
+                          runId={currentRun.id}
+                          busy={busy}
+                          api={api}
+                          act={act}
+                          refresh={refresh}
+                        />
                       )}
                     {deliveries
                       .filter((d) => d.runId === currentRun.id)

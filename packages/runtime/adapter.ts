@@ -1,11 +1,18 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { writeFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  writeFileSync,
+  readFileSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join, resolve, isAbsolute, delimiter, extname } from "node:path";
 import { z } from "zod";
 import type { Job } from "./protocol.js";
 import { DiagnosisResult } from "../diagnosis/index.js";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 export const Result = z.object({
   summary: z.string().min(1),
@@ -13,6 +20,26 @@ export const Result = z.object({
   risks: z.array(z.string()),
 });
 export class UnconfirmedStop extends Error {}
+export function executablePath(command: string, cwd = process.cwd()) {
+  if (process.platform !== "win32") return command;
+  if (isAbsolute(command)) return command;
+  if (command.includes("/") || command.includes("\\"))
+    return resolve(cwd, command);
+  // Never implicitly search an agent-controlled working directory.
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(dir)) continue;
+    const candidate = join(dir, extname(command) ? command : `${command}.exe`);
+    try {
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {}
+  }
+  throw new Error(`Executable was not found on the absolute PATH: ${command}`);
+}
+const managed = new WeakMap<
+  ChildProcess,
+  { stopPath: string; proofPath: string; stopped?: boolean }
+>();
+const stopping = new WeakMap<ChildProcess, Promise<void>>();
 export function runtimeSettings() {
   let content = "";
   try {
@@ -37,15 +64,18 @@ export function runtimeSettings() {
   };
 }
 export function probeCodex(command = process.env.AI_WORK_OS_CODEX ?? "codex") {
-  const result = spawnSync(command, ["--version"], {
-    encoding: "utf8",
-    timeout: 10000,
-    windowsHide: true,
-  });
+  let result: ReturnType<typeof spawnSync> | undefined;
+  try {
+    result = spawnSync(executablePath(command), ["--version"], {
+      encoding: "utf8",
+      timeout: 10000,
+      windowsHide: true,
+    });
+  } catch {}
   return {
     id: "codex",
-    available: result.status === 0,
-    version: result.status === 0 ? result.stdout.trim() : null,
+    available: result?.status === 0,
+    version: result?.status === 0 ? String(result.stdout).trim() : null,
     ...runtimeSettings(),
     capabilities: {
       jsonEvents: true,
@@ -56,13 +86,44 @@ export function probeCodex(command = process.env.AI_WORK_OS_CODEX ?? "codex") {
     },
   };
 }
-export async function stopTree(child: ChildProcess) {
+export function stopTree(child: ChildProcess): Promise<void> {
+  const pending = stopping.get(child);
+  if (pending) return pending;
+  const result = stopChild(child);
+  stopping.set(child, result);
+  return result;
+}
+async function stopChild(child: ChildProcess) {
+  const group = managed.get(child);
+  if (group) {
+    if (child.exitCode === null && child.signalCode === null) {
+      writeFileSync(group.stopPath, "stop");
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            reject(new UnconfirmedStop("Job termination was not acknowledged")),
+          15000,
+        );
+        child.once("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    if (!group.stopped && readFileSync(group.proofPath, "utf8") !== "stopped")
+      throw new UnconfirmedStop("Missing process containment stop proof");
+    return;
+  }
   if (!child.pid || child.exitCode !== null || child.signalCode !== null)
     return;
   if (process.platform === "win32") {
     await new Promise<void>((resolve, reject) => {
       const killer = spawn(
-        "taskkill",
+        join(
+          process.env.SystemRoot ?? "C:\\Windows",
+          "System32",
+          "taskkill.exe",
+        ),
         ["/PID", String(child.pid), "/T", "/F"],
         { windowsHide: true },
       );
@@ -73,6 +134,20 @@ export async function stopTree(child: ChildProcess) {
           : reject(new Error("Could not confirm process-tree stop")),
       );
     });
+    if (child.exitCode === null && child.signalCode === null)
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () =>
+            reject(
+              new UnconfirmedStop("Process termination was not acknowledged"),
+            ),
+          10000,
+        );
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
   } else {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -89,17 +164,61 @@ export function execute(
   onChild: (child: ChildProcess | null) => void,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    let requestDir: string | undefined;
+    let executable = command,
+      arguments_ = args;
+    if (process.platform === "win32") {
+      requestDir = mkdtempSync(join(tmpdir(), "aiwork-process-"));
+      const requestPath = join(requestDir, "request.json");
+      writeFileSync(
+        requestPath,
+        JSON.stringify({
+          command: executablePath(command, cwd),
+          args,
+          cwd,
+          parentPid: process.pid,
+          stopPath: join(requestDir, "stop"),
+          proofPath: join(requestDir, "stopped"),
+        }),
+        { mode: 0o600 },
+      );
+      executable = join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      );
+      arguments_ = [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        fileURLToPath(new URL("./windows-job.ps1", import.meta.url)),
+        requestPath,
+      ];
+    }
+    const child = spawn(executable, arguments_, {
       cwd,
       windowsHide: true,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (requestDir)
+      managed.set(child, {
+        stopPath: join(requestDir, "stop"),
+        proofPath: join(requestDir, "stopped"),
+      });
     onChild(child);
     let stdout = "",
       stderr = "",
       ended = false;
+    let abortReason: Error | undefined;
     const abort = (reason: string) => {
+      if (abortReason) return;
+      abortReason = new Error(reason);
       void stopTree(child).then(
         () => finish(new Error(reason)),
         (error) => finish(new UnconfirmedStop(String(error))),
@@ -113,7 +232,24 @@ export function execute(
       if (ended) return;
       ended = true;
       clearTimeout(timer);
-      if (!(error instanceof UnconfirmedStop)) onChild(null);
+      error ??= abortReason;
+      if (requestDir) {
+        try {
+          if (readFileSync(join(requestDir, "stopped"), "utf8") !== "stopped")
+            throw new Error("Invalid stop proof");
+          const group = managed.get(child);
+          if (group) group.stopped = true;
+        } catch {
+          error = new UnconfirmedStop(
+            "Process containment stop proof is missing",
+          );
+        }
+      }
+      if (!(error instanceof UnconfirmedStop)) {
+        onChild(null);
+        managed.delete(child);
+        if (requestDir) rmSync(requestDir, { recursive: true, force: true });
+      }
       error ? reject(error) : resolve({ stdout, stderr, code });
     };
     child.stdout!.on("data", (chunk) => {

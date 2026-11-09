@@ -8,6 +8,8 @@ import { type Run, type Task, type Project } from "../domain/index.js";
 import { createWorkspace, workspaceDigest } from "../workspace/index.js";
 import type { Job, WorkerMessage } from "./protocol.js";
 import { validateDiagnosis } from "../diagnosis/index.js";
+import { jobDigest, loadReceipt, pidExists, type Lease } from "./receipt.js";
+import { executablePath } from "./adapter.js";
 
 type Active = {
   outputDir: string;
@@ -18,18 +20,37 @@ type Active = {
   result?: Extract<WorkerMessage, { type: "result" }>;
   failure?: string;
 };
+type Outcome = Pick<
+  Active,
+  "epoch" | "outputDir" | "artifactSubdir" | "result" | "failure"
+>;
 export class Supervisor {
   active = new Map<string, Active>();
   timer?: NodeJS.Timeout;
+  private closing = false;
   constructor(
     public store: Store,
     public service: WorkService,
     public dataDir: string,
     public command: string,
     public commandPrefix: string[] = [],
-  ) {}
+  ) {
+    // Manual work remains available when the optional local executor is absent.
+    try {
+      this.command = executablePath(command);
+    } catch {}
+  }
+  private signal(active: Active, message: { type: string; job?: Job }) {
+    if (!active.child.connected) return;
+    active.child.send(message, (error) => {
+      if (error) {
+        active.failure = "Worker IPC disconnected";
+        if (active.child.connected) active.child.disconnect();
+      }
+    });
+  }
   start() {
-    // A previous controller's worker is not proven stopped. Preserve its lock until explicit reconciliation.
+    // Do not infer writer termination from a controller restart.
     this.store.transaction(() => {
       for (const run of this.store.list<Run>("run"))
         if (
@@ -53,17 +74,19 @@ export class Supervisor {
     }, 500);
   }
   tick() {
+    if (this.closing) return;
+    this.recover();
     for (const [id, active] of this.active) {
       const run = this.service.required<Run>("run", id);
       if (
-        ["pausing", "cancelling"].includes(run.status) ||
+        ["pausing", "cancelling", "reconciling"].includes(run.status) ||
         Date.now() - active.lastHeartbeat > 45000
       ) {
-        if (!["pausing", "cancelling"].includes(run.status))
+        if (!["pausing", "cancelling", "reconciling"].includes(run.status))
           this.store.transaction(() =>
             this.service.transition(id, "reconciling"),
           );
-        if (active.child.connected) active.child.send({ type: "stop" });
+        this.signal(active, { type: "stop" });
       }
     }
     if (this.active.size >= 2) return;
@@ -101,6 +124,12 @@ export class Supervisor {
         )
         .run(row.id);
       if (run.status === "queued") this.service.transition(run.id, "preparing");
+      this.store.put("dispatch_intent", {
+        id: run.id,
+        epoch,
+        protocol: 1,
+        resolved: false,
+      });
     });
     try {
       const project = run.manifest.project as Project;
@@ -183,6 +212,10 @@ export class Supervisor {
           (run.manifest.activePlan as Job["plan"]) ??
           (run.manifest.context as { plan: Job["plan"] })?.plan,
       };
+      job.recovery = {
+        receiptPath: join(this.dataDir, "receipts", run.id, `${epoch}.json`),
+        inputDigest: jobDigest(job),
+      };
       const child = fork(
         new URL("../../apps/worker/index.ts", import.meta.url),
         [],
@@ -190,6 +223,9 @@ export class Supervisor {
           execArgv: ["--import", "tsx"],
           stdio: ["ignore", "ignore", "pipe", "ipc"],
           windowsHide: true,
+          // Keep the worker alive long enough to acknowledge controller IPC loss.
+          // libuv's implicit Windows parent job otherwise kills non-detached children first.
+          detached: process.platform === "win32",
         },
       );
       const active: Active = {
@@ -208,7 +244,19 @@ export class Supervisor {
         active.failure = error.message;
       });
       child.once("close", (code) => this.closed(run.id, code));
-      child.send({ type: "execute", job });
+      if (!child.pid) throw new Error("Worker process was not created");
+      this.store.put<Lease>("execution_lease", {
+        id: run.id,
+        epoch,
+        workerPid: child.pid,
+        inputDigest: job.recovery.inputDigest,
+        receiptPath: job.recovery.receiptPath,
+        outputDir,
+        artifactSubdir: active.artifactSubdir,
+        state: "dispatched",
+        createdAt: new Date().toISOString(),
+      });
+      this.signal(active, { type: "execute", job });
     } catch (error) {
       this.store.transaction(() => {
         this.store.event(run.id, "run.error", {
@@ -216,7 +264,12 @@ export class Supervisor {
         });
         const current = this.service.required<Run>("run", run.id);
         if (["preparing", "running"].includes(current.status))
-          this.service.transition(run.id, "failed");
+          this.service.transition(
+            run.id,
+            this.active.has(run.id) ? "reconciling" : "failed",
+          );
+        const active = this.active.get(run.id);
+        if (active) this.signal(active, { type: "stop" });
         this.store.db
           .prepare("UPDATE outbox SET state='done' WHERE id=?")
           .run(row.id);
@@ -238,7 +291,21 @@ export class Supervisor {
       active.failure = message.message;
       return;
     }
+    this.recordStep(id, message);
+  }
+  private recordStep(
+    id: string,
+    message: Extract<WorkerMessage, { type: "step" }>,
+  ) {
+    const run = this.service.required<Run>("run", id);
+    if (
+      !run.steps.some((s) => s.key === message.key) ||
+      !["running", "succeeded"].includes(message.status)
+    )
+      return;
     this.store.transaction(() => {
+      const marker = `${id}:${message.epoch}:${message.attemptId}:${message.status}`;
+      if (this.store.get("worker_message", marker)) return;
       const updated = {
         ...run,
         steps: run.steps.map((s) =>
@@ -262,15 +329,41 @@ export class Supervisor {
         updatedAt: new Date().toISOString(),
       });
       this.store.event(id, "step.updated", message, "worker");
+      this.store.put("worker_message", { id: marker });
     });
   }
   closed(id: string, code: number | null) {
     const active = this.active.get(id);
     if (!active) return;
     this.active.delete(id);
+    const lease = this.store.get<Lease>("execution_lease", id),
+      receipt = lease && loadReceipt(lease);
+    const confirmed =
+      code === 0 &&
+      lease?.epoch === active.epoch &&
+      receipt?.stopped === true &&
+      receipt.childPid === null;
+    if (confirmed && receipt) {
+      for (const message of receipt.messages) {
+        if (message.type === "step") this.recordStep(id, message);
+        else if (message.type === "result") active.result = message;
+        else active.failure = message.message;
+      }
+    }
+    this.settle(id, active, confirmed);
+  }
+  private settle(id: string, active: Outcome, confirmed: boolean) {
     this.store.transaction(() => {
-      const run = this.service.required<Run>("run", id);
-      this.store.event(id, "worker.stopped", { code, epoch: active.epoch });
+      let run = this.service.required<Run>("run", id);
+      this.store.event(id, "worker.stopped", {
+        confirmed,
+        epoch: active.epoch,
+      });
+      if (confirmed) {
+        const lease = this.store.get<Lease>("execution_lease", id);
+        if (lease?.epoch === active.epoch)
+          this.store.put("execution_lease", { ...lease, state: "stopped" });
+      }
       for (const attempt of this.store.list<{
         id: string;
         runId: string;
@@ -284,7 +377,7 @@ export class Supervisor {
         )
           this.store.put("attempt", {
             ...attempt,
-            status: code === 0 ? "interrupted" : "unknown",
+            status: confirmed ? "interrupted" : "unknown",
           });
       }
       const binding = this.store.get<{ id: string; locked: boolean }>(
@@ -292,7 +385,7 @@ export class Supervisor {
         id,
       );
       let checkpointDigest: string | undefined;
-      if (binding && code === 0) {
+      if (binding && confirmed) {
         try {
           checkpointDigest = workspaceDigest(
             (binding as unknown as { workspace: string }).workspace,
@@ -308,11 +401,18 @@ export class Supervisor {
           checkpointDigest,
         });
       }
-      if (run.status === "cancelling" && code === 0) {
+      if (run.status === "reconciling" && confirmed && active.result)
+        run = this.service.transition(id, "running");
+      if (run.status === "cancelling" && confirmed) {
         this.service.transition(id, "cancelled");
         const task = this.service.required<Task>("task", run.taskId);
         this.store.put("task", { ...task, status: "planned" });
-      } else if (run.status === "pausing" && code === 0 && checkpointDigest) {
+      } else if (
+        ["pausing", "reconciling"].includes(run.status) &&
+        confirmed &&
+        checkpointDigest &&
+        (run.status === "pausing" || (!active.result && !active.failure))
+      ) {
         const paused = this.service.transition(id, "paused");
         this.store.put("run", {
           ...paused,
@@ -320,14 +420,27 @@ export class Supervisor {
             s.status === "running" ? { ...s, status: "paused" } : s,
           ),
         });
-      } else if (run.status === "running" && code === 0 && active.result) {
+      } else if (run.status === "running" && confirmed && active.result) {
         let evidenceValid = false;
         try {
           const workspace = this.store.get<{ workspace: string }>(
             "workspace",
             id,
           )!;
+          const requiredArtifacts =
+            (run.manifest.task as Task).type === "diagnosis"
+              ? ["diagnosis.json", "context.json", "delivery.json"]
+              : [
+                  "changes.patch",
+                  "untracked.json",
+                  "files.json",
+                  "test.json",
+                  "delivery.json",
+                ];
           evidenceValid =
+            requiredArtifacts.every((name) =>
+              active.result!.artifacts.includes(name),
+            ) &&
             workspaceDigest(workspace.workspace) ===
               active.result.subjectDigest &&
             active.result.artifacts.every(
@@ -381,7 +494,11 @@ export class Supervisor {
           const task = this.service.required<Task>("task", run.taskId);
           this.store.put("task", { ...task, status: "awaiting_acceptance" });
         }
-      } else if (run.status === "running" && code === 0 && active.failure) {
+      } else if (
+        ["running", "reconciling"].includes(run.status) &&
+        confirmed &&
+        active.failure
+      ) {
         this.service.transition(id, "failed");
         this.store.event(id, "run.error", { message: active.failure });
       } else if (run.status === "running" || run.status === "pausing") {
@@ -395,14 +512,130 @@ export class Supervisor {
         .run(id);
     });
   }
+  recover() {
+    for (const run of this.store.list<Run>("run")) {
+      if (
+        this.active.has(run.id) ||
+        !["reconciling", "cancelling"].includes(run.status)
+      )
+        continue;
+      const lease = this.store.get<Lease>("execution_lease", run.id);
+      const intent = this.store.get<{
+        id: string;
+        epoch: string;
+        protocol: number;
+        resolved: boolean;
+      }>("dispatch_intent", run.id);
+      if (
+        intent?.protocol === 1 &&
+        !intent.resolved &&
+        lease?.epoch !== intent.epoch
+      ) {
+        this.store.transaction(() => {
+          const binding = this.store.get<{
+            id: string;
+            epoch: string;
+            workspace: string;
+            locked: boolean;
+          }>("workspace", run.id);
+          let checkpointDigest: string | undefined;
+          if (binding?.epoch === intent.epoch) {
+            try {
+              checkpointDigest = workspaceDigest(binding.workspace);
+            } catch {}
+            this.store.put("workspace", {
+              ...binding,
+              locked: false,
+              checkpointDigest,
+            });
+          }
+          this.store.event(run.id, "recovery.not_dispatched", {
+            epoch: intent.epoch,
+          });
+          this.store.put("dispatch_intent", { ...intent, resolved: true });
+          if (run.status === "cancelling") {
+            this.service.transition(run.id, "cancelled");
+            const task = this.service.required<Task>("task", run.taskId);
+            this.store.put("task", { ...task, status: "planned" });
+          } else
+            this.service.transition(
+              run.id,
+              checkpointDigest ? "paused" : "failed",
+            );
+          this.store.db
+            .prepare("UPDATE outbox SET state='done' WHERE run_id=?")
+            .run(run.id);
+        });
+        continue;
+      }
+      if (!lease || lease.state === "stopped" || pidExists(lease.workerPid))
+        continue;
+      if (
+        this.store.get<{ epoch: string }>("workspace", run.id)?.epoch !==
+        lease.epoch
+      )
+        continue;
+      const receipt = loadReceipt(lease);
+      // POSIX process groups allow detached descendants; they cannot prove full containment.
+      if (
+        !receipt?.stopped ||
+        receipt.childPid !== null ||
+        receipt.containment !== "windows-job-v1" ||
+        (receipt.lastChildPid && pidExists(receipt.lastChildPid))
+      )
+        continue;
+      this.store.transaction(() => {
+        for (const message of receipt.messages)
+          if (message.type === "step") this.recordStep(run.id, message);
+        this.store.event(run.id, "recovery.verified", {
+          epoch: lease.epoch,
+          inputDigest: lease.inputDigest,
+          method: "durable-worker-receipt",
+        });
+        this.settle(
+          run.id,
+          {
+            ...lease,
+            result: receipt.messages.find((m) => m.type === "result"),
+            failure: receipt.messages.find((m) => m.type === "failure")
+              ?.message,
+          },
+          true,
+        );
+      });
+    }
+  }
   async close() {
+    this.closing = true;
     if (this.timer) clearInterval(this.timer);
     await Promise.all(
       [...this.active.values()].map(
         (active) =>
-          new Promise<void>((resolve) => {
-            active.child.once("close", () => resolve());
-            active.child.send({ type: "stop" });
+          new Promise<void>((resolve, reject) => {
+            const id = [...this.active].find(([, a]) => a === active)?.[0];
+            const timer = setTimeout(() => {
+              if (id) {
+                const run = this.service.required<Run>("run", id);
+                if (["running", "pausing"].includes(run.status))
+                  this.service.transition(id, "reconciling");
+                this.store.event(id, "recovery.required", {
+                  reason: "Shutdown timed out; workspace lock retained",
+                });
+              }
+              reject(
+                new Error("Worker shutdown timed out; workspace lock retained"),
+              );
+            }, 30000);
+            active.child.once("close", () => {
+              clearTimeout(timer);
+              resolve();
+            });
+            if (
+              id &&
+              this.service.required<Run>("run", id).status === "running"
+            )
+              this.service.control(id, "pause");
+            this.signal(active, { type: "stop" });
           }),
       ),
     );

@@ -2,6 +2,7 @@ export type TestCommand = { executable: string; args: string[] };
 export type Job = {
   runId: string;
   epoch: string;
+  recovery?: { receiptPath: string; inputDigest: string };
   workspace: string;
   outputDir: string;
   command: string;

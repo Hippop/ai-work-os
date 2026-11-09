@@ -15,33 +15,117 @@ import {
 } from "../../packages/workspace/index.js";
 import { defaultPlan } from "../../packages/resources/index.js";
 import { validateDiagnosis } from "../../packages/diagnosis/index.js";
+import {
+  jobDigest,
+  saveReceipt,
+  type Receipt,
+} from "../../packages/runtime/receipt.js";
 
 let current: ChildProcess | null = null,
   stopping = false,
   busy = false;
 let stopPromise: Promise<void> | undefined;
+let receipt: Receipt | undefined, receiptPath: string | undefined;
+function persist() {
+  if (receipt && receiptPath) {
+    receipt.updatedAt = new Date().toISOString();
+    saveReceipt(receiptPath, receipt);
+  }
+}
+function onChild(child: ChildProcess | null) {
+  current = child;
+  if (receipt) {
+    receipt.childPid = child?.pid ?? null;
+    if (child?.pid) receipt.lastChildPid = child.pid;
+    persist();
+  }
+}
+function stopped() {
+  if (process.exitCode === 2)
+    throw new UnconfirmedStop("Worker stop was not confirmed");
+  if (receipt) {
+    receipt.childPid = null;
+    receipt.stopped = true;
+    persist();
+  }
+}
+function unconfirmed(error: unknown) {
+  if (receipt) {
+    receipt.stopped = false;
+    receipt.stopError = String(error);
+    try {
+      persist();
+    } catch {}
+  }
+  process.exit(2);
+}
+process.on("uncaughtExceptionMonitor", (error) => {
+  if (receipt) {
+    receipt.stopped = false;
+    receipt.stopError = String(error);
+    try {
+      persist();
+    } catch {}
+  }
+});
 function stop(): Promise<void> {
   if (stopPromise) return stopPromise;
   stopping = true;
   stopPromise = (async () => {
     if (current) await stopTree(current);
+    current = null;
+    stopped();
     process.exit(0);
   })();
   return stopPromise;
 }
 process.on("disconnect", () => {
-  void stop().catch(() => process.exit(2));
+  void stop().catch(unconfirmed);
 });
 process.on("message", async (message: { type: string; job?: Job }) => {
   if (message.type === "stop") {
-    void stop().catch(() => process.exit(2));
+    void stop().catch(unconfirmed);
     return;
   }
   if (message.type !== "execute" || !message.job || busy) return;
   busy = true;
   const job = message.job;
+  if (job.recovery) {
+    if (jobDigest(job) !== job.recovery.inputDigest) {
+      process.exit(2);
+      return;
+    }
+    receiptPath = job.recovery.receiptPath;
+    receipt = {
+      version: 1,
+      runId: job.runId,
+      epoch: job.epoch,
+      inputDigest: job.recovery.inputDigest,
+      workerPid: process.pid,
+      containment:
+        process.platform === "win32" ? "windows-job-v1" : "posix-process-group",
+      updatedAt: new Date().toISOString(),
+      stopped: false,
+      childPid: null,
+      lastChildPid: null,
+      messages: [],
+    };
+    try {
+      persist();
+    } catch {
+      process.exit(2);
+      return;
+    }
+  }
   const send = (event: WorkerMessage) => {
-    if (process.connected) process.send?.(event);
+    if (receipt && event.type !== "heartbeat") {
+      receipt.messages.push(event);
+      persist();
+    }
+    if (process.connected)
+      process.send?.(event, (error) => {
+        if (error) void stop().catch(unconfirmed);
+      });
   };
   const timer = setInterval(
     () => send({ type: "heartbeat", epoch: job.epoch }),
@@ -84,9 +168,7 @@ process.on("message", async (message: { type: string; job?: Job }) => {
           job.testCommand.args,
           job.workspace,
           job.deadline,
-          (child) => {
-            current = child;
-          },
+          onChild,
         );
         const after = workspaceDigest(job.workspace);
         detail = {
@@ -197,9 +279,7 @@ process.on("message", async (message: { type: string; job?: Job }) => {
           job,
           key,
           `${basePrompt}\nStep: ${operation}. Node: ${key}. ${operation === "implement" ? "Implement the change and required tests." : operation === "review" ? "Review the final change. Return nonempty risks for blocking defects; do not modify files." : "Analyze and report only; do not modify files."}\nPrior results: ${JSON.stringify(summaries)}`,
-          (child) => {
-            current = child;
-          },
+          onChild,
           operation,
         );
         if (
@@ -235,6 +315,20 @@ process.on("message", async (message: { type: string; job?: Job }) => {
       });
   } finally {
     clearInterval(timer);
-    process.disconnect?.();
+    try {
+      if (current) await stopTree(current);
+      current = null;
+      stopped();
+    } catch (error) {
+      process.exitCode = 2;
+      if (receipt) {
+        receipt.stopped = false;
+        receipt.stopError = String(error);
+        try {
+          persist();
+        } catch {}
+      }
+    }
+    if (process.connected) process.disconnect?.();
   }
 });
