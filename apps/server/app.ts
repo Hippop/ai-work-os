@@ -496,11 +496,17 @@ export function createApp(
   app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
   app.get("/api/v2/knowledge", (_req, res) => res.json(adaptiveAssets.listKnowledge()));
   app.post("/api/v2/knowledge", (req, res) => res.status(201).json(adaptiveAssets.createKnowledge(req.body)));
+  app.post("/api/v2/knowledge/:id/draft", (req, res) =>
+    res.json(adaptiveAssets.updateKnowledgeDraft(req.params.id, req.body)));
+  app.post("/api/v2/knowledge/:id/revise", (req, res) =>
+    res.status(201).json(adaptiveAssets.reviseKnowledge(req.params.id, req.body)));
   app.post("/api/v2/knowledge/:id/publish", (req, res) => res.json(adaptiveAssets.publishKnowledge(req.params.id)));
   app.post("/api/v2/knowledge/:id/revoke", (req, res) => {
     adaptiveAssets.revokeKnowledge(req.params.id); res.json({ status: "revoked" });
   });
   app.get("/api/v2/knowledge-bindings", (_req, res) => res.json(store.list("adaptive_knowledge_binding")));
+  app.post("/api/v2/knowledge-bindings/:id/revoke", (req, res) =>
+    res.json(adaptiveAssets.revokeKnowledgeBinding(req.params.id)));
   app.post("/api/v2/knowledge-bindings", (req, res) =>
     res.status(201).json(adaptiveAssets.bindKnowledge(req.body)));
   app.post("/api/v2/knowledge/search", (req, res) => {
