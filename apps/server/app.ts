@@ -4,6 +4,7 @@ import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { McpRegistry } from "../../packages/adaptive/mcp.js";
+import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import express from "express";
 import { z, ZodError } from "zod";
@@ -491,6 +492,23 @@ export function createApp(
     res.json(mcpRegistry.publish(req.params.id)));
   app.post("/api/v2/mcp-servers/:id/revoke", (req, res) =>
     res.json(mcpRegistry.revoke(req.params.id)));
+  const mcpWrites = new McpWriteService(store);
+  app.get("/api/v2/mcp-write-intents", (_req, res) => res.json(mcpWrites.list()));
+  app.post("/api/v2/mcp-write-intents", (req, res) =>
+    res.status(201).json(mcpWrites.request(req.body)));
+  app.get("/api/v2/mcp-write-intents/:id/events", (req, res) =>
+    res.json(store.events("mcp-write:" + req.params.id)));
+  app.post("/api/v2/mcp-write-intents/:id/decision", (req, res) => {
+    const b = z.object({ approve: z.boolean(), reason: z.string().min(10),
+      expectedArgsDigest: z.string().min(32).max(128) }).strict().parse(req.body);
+    res.json(mcpWrites.decide(req.params.id,b.approve,b.reason,b.expectedArgsDigest));
+  });
+  app.post("/api/v2/mcp-write-intents/:id/execute", async (req, res) =>
+    res.json(await mcpWrites.execute(req.params.id)));
+  app.post("/api/v2/mcp-write-intents/:id/reconcile", (req, res) => {
+    const b = z.object({ note: z.string().min(20) }).strict().parse(req.body);
+    res.json(mcpWrites.reconcile(req.params.id,b.note));
+  });
   app.get("/api/v2/profiles", (_req, res) => res.json(store.list("adaptive_profile")));
   app.post("/api/v2/profiles", (req, res) => res.status(201).json(adaptiveAssets.createProfile(req.body)));
   app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
