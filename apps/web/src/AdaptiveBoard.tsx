@@ -40,15 +40,16 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
   const [plan, setPlan] = useState(json(initialPlan));
   const [events, setEvents] = useState<any[]>([]);
   const [notice, setNotice] = useState("");
+  const [analytics, setAnalytics] = useState<any>(null);
   const [knowledgeScope, setKnowledgeScope] = useState("global");
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
   async function load() {
-    const [c,p,k,s,sk,r,mcp] = await Promise.all([
+    const [c,p,k,s,sk,r,mcp,stats] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
-      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"),
+      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"), api("/v2/analytics"),
     ]);
-    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp);
+    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats);
   }
   useEffect(() => { void act(load); }, []);
   useEffect(() => {
@@ -426,6 +427,34 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
         })}>确认并下发执行</button>
       </div>
       <p>观察点默认阻塞受影响后继节点；失败事件同样可触发评估。运行中的结果不能由编排 Agent 原地覆盖。当前按需调用仍以单机 Linux 为优先目标。</p>
+    </div>
+    <div className="panel">
+      <h2>运行监控与优化候选</h2>
+      <p>基于已持久化执行事件生成统计，只读展示，不自动修改能力或模型配置。</p>
+      {analytics && <>
+        <div className="form-row">
+          <p>最近 {analytics.range.days} 天任务：<b>{analytics.range.runCount}</b></p>
+          <p>样本调用：<b>{analytics.range.sampledInvocations}</b></p>
+          <p>观察评估：<b>{analytics.checkpoints.decided}</b></p>
+          <p>重规划：<b>{analytics.replans}</b></p>
+        </div>
+        <details><summary>运行状态与事件统计</summary><pre>{json({runs:analytics.runStatuses,events:analytics.events})}</pre></details>
+        <h3>能力执行指标</h3>
+        {analytics.invocations.map((c: any) => (
+          <article className="project" key={c.capabilityRef}>
+            <b>{c.capabilityRef}</b> · {c.invoked} 次
+            <p>成功 {c.succeeded} · 失败 {c.failed} · 不确定 {c.uncertain} · 均耗时 {c.averageDurationMs ?? "未知"} ms</p>
+            <small>已观测 tokens：输入 {c.inputTokens} / 输出 {c.outputTokens}</small>
+          </article>
+        ))}
+        <h3>待评审的优化候选</h3>
+        {analytics.recommendations.length===0 ? <p>暂无达到分析阈值的高失败率能力。</p> :
+          analytics.recommendations.map((c:any,i:number)=><article className="project" key={i}>
+            <b>{c.capabilityRef}</b> · {c.reason}
+            <pre>{json(c.evidence)}</pre>
+          </article>)}
+      </>}
+      <button className="quiet" onClick={() => void act(load)}>刷新运行指标</button>
     </div>
     <div className="panel">
       <h2>执行与观察记录</h2>
