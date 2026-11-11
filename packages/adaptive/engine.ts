@@ -212,7 +212,15 @@ export class AdaptiveEngine {
       for (const run of this.store.list<AdaptiveRun>("adaptive_run")) {
         if (Object.values(run.nodeStates).some((s) => s === "running") ||
             Object.values(run.observationStates).some((s) => s === "running")) {
-          for (const key of Object.keys(run.nodeStates)) if (run.nodeStates[key] === "running") run.nodeStates[key] = "uncertain";
+          for (const key of Object.keys(run.nodeStates)) if (run.nodeStates[key] === "running") {
+            run.nodeStates[key] = "uncertain";
+            for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
+              x.runId === run.id && x.nodeId === key && x.status === "running")) {
+              this.store.put("adaptive_invocation", { ...invocation, status: "uncertain" });
+              const effect = this.store.get<any>("adaptive_side_effect", invocation.id);
+              if (effect) this.store.put("adaptive_side_effect", { ...effect, state: "uncertain", reason: "controller_restart" });
+            }
+          }
           for (const key of Object.keys(run.observationStates)) if (run.observationStates[key] === "running") run.observationStates[key] = "waiting";
           run.status = "reconciling";
           this.save(run);
@@ -301,6 +309,11 @@ export class AdaptiveEngine {
         nodeId, profileRef, inputDigest: digest(input), knowledgeRefs: knowledge.map((k) => ({ id:k.id, digest:k.digest })),
         status: "running", startedAt: new Date().toISOString(),
       });
+      if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write")
+        this.store.put("adaptive_side_effect", {
+          id: invocationId, runId: id, nodeId, capabilityRef: cap.id,
+          inputDigest: digest(input), state: "started", createdAt: new Date().toISOString(),
+        });
       run.nodeStates[nodeId] = "running"; run.status = "running"; this.save(run);
       this.store.event(id, "adaptive.invocation.started", { invocationId, nodeId, profileRef, inputDigest: digest(input) });
       return { run, node, capability: cap, profileRef, input, invocationId, task, knowledge };
@@ -326,6 +339,11 @@ export class AdaptiveEngine {
         if (run.nodeStates[nodeId] !== "running") return;
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
         this.store.put("adaptive_invocation", { ...record, status: "succeeded", finishedAt: new Date().toISOString(), outputDigest: digest(response.output) });
+        const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
+        if (effect) this.store.put("adaptive_side_effect", {
+          ...effect, state: "confirmed", outputDigest: digest(response.output),
+          confirmedAt: new Date().toISOString(),
+        });
         run.results[nodeId] = { output: response.output, artifactRefs: response.artifacts ?? [], invocationId: prepared.invocationId, digest: digest(response.output) };
         run.nodeStates[nodeId] = "succeeded"; this.activateObservations(run, nodeId, "succeeded");
         this.save(run); this.store.event(id, "adaptive.invocation.completed", { nodeId, invocationId: prepared.invocationId, outputDigest: digest(response.output) });
@@ -336,10 +354,20 @@ export class AdaptiveEngine {
         if (run.nodeStates[nodeId] !== "running") return;
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
         const message = String((error as Error).message).slice(0, 2000);
-        this.store.put("adaptive_invocation", { ...record, status: "failed", finishedAt: new Date().toISOString(), error: message });
-        run.nodeStates[nodeId] = "failed"; run.failures[nodeId] = message;
-        this.activateObservations(run, nodeId, "failed"); this.save(run);
-        this.store.event(id, "adaptive.invocation.failed", { nodeId, invocationId: prepared.invocationId, message });
+        const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
+        const uncertain = !!effect;
+        this.store.put("adaptive_invocation", { ...record, status: uncertain ? "uncertain" : "failed",
+          finishedAt: new Date().toISOString(), error: message });
+        if (effect) this.store.put("adaptive_side_effect", {
+          ...effect, state: "uncertain", reason: message, at: new Date().toISOString(),
+        });
+        run.nodeStates[nodeId] = uncertain ? "uncertain" : "failed";
+        run.failures[nodeId] = message;
+        if (uncertain) run.status = "reconciling";
+        else this.activateObservations(run, nodeId, "failed");
+        this.save(run);
+        this.store.event(id, uncertain ? "adaptive.side_effect.uncertain" : "adaptive.invocation.failed",
+          { nodeId, invocationId: prepared.invocationId, message });
       });
     }
   }
