@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, realpathSync, statSync } from "node:fs";
+import { join, resolve, relative, isAbsolute, sep } from "node:path";
 import { execFileSync, type ChildProcess } from "node:child_process";
 import { z } from "zod";
 import { DomainError, digest, type Project, type Task } from "../domain/index.js";
@@ -171,10 +171,20 @@ export class AdaptiveRuntime {
           this.store.put("adaptive_workspace", { id: call.run.id, path: workspace, baseCommit: base });
         }
       }
+      // Worktree or project subdirectory stays within the real authorized root.
+      const root = realpathSync(workspace);
+      const requested = resolve(root, profile.workspaceSubdir ?? ".");
+      let workingDirectory: string;
+      try { workingDirectory = realpathSync(requested); }
+      catch { throw new DomainError("working_dir_missing", "指定的工作目录不存在", 422); }
+      const rel = relative(root, workingDirectory);
+      if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel) ||
+          !statSync(workingDirectory).isDirectory())
+        throw new DomainError("working_dir_escape", "工作目录越过授权根目录", 403);
       if (profile.executor === "program" || profile.executor === "project-test") {
         const before = workspaceDigest(workspace);
         const program = profile.executor === "project-test" ? project.testCommand! : profile.program!;
-        const r = await execute(program.executable, program.args, workspace,
+        const r = await execute(program.executable, program.args, workingDirectory,
           Date.now() + profile.timeoutSeconds * 1000, this.child);
         if (r.code !== 0) throw new Error("Program returned " + r.code + ": " + r.stderr.slice(0, 800));
         if (workspaceDigest(workspace) !== before)
@@ -199,7 +209,7 @@ export class AdaptiveRuntime {
         "Return JSON summary, evidence and risks; never claim unverified facts or bypass constraints.",
       ].join("\n");
       const job = {
-        runId: call.run.id, epoch: randomUUID(), workspace, outputDir: folder,
+        runId: call.run.id, epoch: randomUUID(), workspace: workingDirectory, outputDir: folder,
         command: this.command(), commandPrefix: [], objective: call.task.objective,
         criteria: call.task.acceptanceCriteria, testCommand: project.testCommand ?? { executable:"true", args: [] },
         deadline: Date.now() + profile.timeoutSeconds * 1000, model: profile.model ?? this.model,
