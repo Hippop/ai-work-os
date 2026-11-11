@@ -54,6 +54,7 @@ test("advisory checkpoint does not prevent a ready downstream capability from ex
       ],
       observations: [{ id: "advice", afterNode: "first", on: ["succeeded" as const], barrier: false,
         question: "What can be learned?", maxInvocations: 1 }],
+      rationale: "Advisory checkpoint should not block downstream",
     };
     const order: string[] = [];
     const engine = new AdaptiveEngine(store, assets, async ({ node }) => { order.push(node.id); return { output: { summary: "ok" } }; }, {
