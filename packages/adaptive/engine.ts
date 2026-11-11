@@ -11,6 +11,11 @@ export const PlanNodeInput = z.object({
   capabilityRef: z.string().min(3).max(180),
   profileRef: z.string().max(180).optional(),
   dependsOn: z.array(nodeId).max(30).default([]),
+  condition: z.object({
+    fromNode: nodeId,
+    field: z.string().regex(/^[a-zA-Z_][\w]{0,99}$/),
+    equals: z.union([z.string(), z.number().finite(), z.boolean(), z.null()]),
+  }).optional(),
   inputs: z.record(z.string(), z.unknown()).default({}),
   bindings: z.record(z.string(), z.object({
     fromNode: nodeId,
@@ -30,7 +35,7 @@ export const PlanInput = z.object({
   rationale: z.string().max(6000).default(""),
 });
 export type Plan = z.infer<typeof PlanInput>;
-type NState = "pending" | "running" | "succeeded" | "failed" | "waiting" | "uncertain" | "invalidated";
+type NState = "pending" | "running" | "succeeded" | "skipped" | "failed" | "waiting" | "uncertain" | "invalidated";
 type OState = "pending" | "running" | "waiting" | "completed";
 export type AdaptiveRun = {
   id: string; taskId: string; status: "queued" | "running" | "waiting" | "reconciling" | "failed" | "awaiting_acceptance" | "done" | "cancelled";
@@ -113,6 +118,17 @@ export class AdaptiveEngine {
         const actual = (outputProps[root] as Record<string, unknown>).type;
         if (expected !== actual && !binding.field.includes("."))
           throw new DomainError("binding_type", "上下游字段类型不兼容", 422);
+      }
+      if (node.condition) {
+        if (!node.dependsOn.includes(node.condition.fromNode))
+          throw new DomainError("condition_dependency", "分支条件必须引用直接前驱", 422);
+        const source = capabilities.get(node.condition.fromNode);
+        const out = (source?.outputSchema.properties ?? {}) as Record<string, unknown>;
+        const property = out[node.condition.field] as Record<string, unknown> | undefined;
+        if (!property) throw new DomainError("condition_field", "条件字段不存在于前驱输出中", 422);
+        const actual = node.condition.equals === null ? "null" : typeof node.condition.equals;
+        if (property.type !== actual && !(property.type === "integer" && actual === "number"))
+          throw new DomainError("condition_type", "条件比较值与输出字段不匹配", 422);
       }
       for (const field of (schema.required ?? []) as string[]) if (!Object.hasOwn(node.inputs, field) && !Object.hasOwn(node.bindings, field))
         throw new DomainError("binding_missing", "缺少能力必填输入：" + node.id + "." + field, 422);
@@ -255,43 +271,96 @@ export class AdaptiveEngine {
     return run.plan.observations.some((obs) => obs.barrier && ancestors.has(obs.afterNode) &&
       ["pending", "running", "waiting"].includes(run.observationStates[obs.id] ?? ""));
   }
-  private ready(run: AdaptiveRun) {
-    return run.plan.nodes.find((n) => run.nodeStates[n.id] === "pending" &&
-      n.dependsOn.every((id) => run.nodeStates[id] === "succeeded") && !this.observationBlocked(run, n));
+  private dependenciesSettled(run: AdaptiveRun, node: Plan["nodes"][number]) {
+    return node.dependsOn.every((id) => ["succeeded", "skipped"].includes(run.nodeStates[id]));
   }
-  /** One async tick, no resident Agent session; scheduler process may call this periodically. */
+  private ready(run: AdaptiveRun) {
+    return run.plan.nodes.filter((n) => run.nodeStates[n.id] === "pending" &&
+      this.dependenciesSettled(run, n) && !this.observationBlocked(run, n));
+  }
+  /** A skipped input cannot be consumed; downstream nodes with no such binding may join normally. */
+  private skipConditional(runId: string, candidates: Plan["nodes"]) {
+    return this.store.transaction(() => {
+      const run = this.get(runId);
+      let changed = false;
+      for (const node of candidates) {
+        if (run.nodeStates[node.id] !== "pending" || !this.dependenciesSettled(run, node)) continue;
+        const unavailable = Object.values(node.bindings).some((binding) =>
+          run.nodeStates[binding.fromNode] === "skipped");
+        const result = node.condition
+          ? run.results[node.condition.fromNode]?.output as Record<string, unknown> | undefined : undefined;
+        const mismatch = node.condition && (
+          run.nodeStates[node.condition.fromNode] === "skipped" ||
+          !result || result[node.condition.field] !== node.condition.equals
+        );
+        if (!unavailable && !mismatch) continue;
+        run.nodeStates[node.id] = "skipped";
+        this.store.event(runId, "adaptive.node.skipped", {
+          nodeId: node.id, reason: unavailable ? "upstream_skipped" : "condition_not_met",
+        });
+        changed = true;
+      }
+      if (changed) this.save(run);
+      return changed;
+    });
+  }
+  /** Per-run independent branches can execute in parallel, with a single writer per worktree. */
   async tick(): Promise<void> {
     if (this.stopping) return;
-    for (const snapshot of this.store.list<AdaptiveRun>("adaptive_run")) {
-      if (this.busy.has(snapshot.id) || !["queued", "running"].includes(snapshot.status)) continue;
-      const run = this.get(snapshot.id);
-      const pendingObs = run.plan.observations.find((o) => run.observationStates[o.id] === "pending");
-      const readyNode = this.ready(run);
-      // Advisory observations do not halt ready work; barrier observations do.
-      if (pendingObs && (pendingObs.barrier || !readyNode)) {
-        this.busy.add(run.id);
-        try { await this.observe(run.id, pendingObs.id); } finally { this.busy.delete(run.id); this.notify(); }
-        continue;
+    const jobs = this.store.list<AdaptiveRun>("adaptive_run")
+      .filter((r) => !this.busy.has(r.id) && ["queued", "running"].includes(r.status));
+    await Promise.all(jobs.map(async (snapshot) => {
+      this.busy.add(snapshot.id);
+      try {
+        let run = this.get(snapshot.id);
+        let readyNodes = this.ready(run);
+        // Resolve false conditions before launching work; repeated passes propagate branch skips.
+        while (this.skipConditional(run.id, readyNodes)) {
+          run = this.get(run.id); readyNodes = this.ready(run);
+        }
+        const obs = run.plan.observations.find((o) => run.observationStates[o.id] === "pending");
+        if (obs && (obs.barrier || readyNodes.length === 0)) {
+          await this.observe(run.id, obs.id);
+          return;
+        }
+        if (readyNodes.length > 0) {
+          const writes = readyNodes.filter((n) =>
+            run.snapshots[n.id].capability.sideEffect === "workspace-write");
+          // Never let any read/write invocation race with a mutating worktree invocation.
+          const batch = writes.length ? [writes[0]] : readyNodes.slice(0, 4);
+          await Promise.all(batch.map((node) => this.executeNode(run.id, node.id)));
+          return;
+        }
+        const settled = run.plan.nodes.every((n) => ["succeeded", "skipped"].includes(run.nodeStates[n.id]));
+        const observationsDone = run.plan.observations.every((o) =>
+          !["pending", "running", "waiting"].includes(run.observationStates[o.id] ?? ""));
+        if (settled && observationsDone) {
+          this.store.transaction(() => {
+            const current = this.get(run.id);
+            current.status = "awaiting_acceptance"; this.save(current);
+            this.store.event(current.id, "adaptive.run.delivered", {
+              results: Object.keys(current.results),
+              skipped: Object.entries(current.nodeStates).filter(([,v]) => v === "skipped").map(([k]) => k),
+            });
+          });
+        } else if (Object.values(run.nodeStates).some((v) => v === "failed") &&
+          !run.plan.observations.some((o) => run.observationStates[o.id] === "pending")) {
+          this.store.transaction(() => {
+            const current = this.get(run.id); current.status = "failed"; this.save(current);
+            this.store.event(current.id, "adaptive.run.failed", { failures: current.failures });
+          });
+        }
+      } finally {
+        this.busy.delete(snapshot.id);
+        // Avoid idle wakeup spinning: only notify if there is immediately ready work.
+        const current = this.get(snapshot.id);
+        if (["queued","running"].includes(current.status) &&
+            (this.ready(current).length > 0 ||
+              current.plan.observations.some((o) => current.observationStates[o.id] === "pending") ||
+              current.plan.nodes.every((n) => ["succeeded", "skipped"].includes(current.nodeStates[n.id]))))
+          this.notify();
       }
-      const node = readyNode;
-      if (node) {
-        this.busy.add(run.id);
-        try { await this.executeNode(run.id, node.id); } finally { this.busy.delete(run.id); this.notify(); }
-      } else if (run.plan.nodes.every((n) => run.nodeStates[n.id] === "succeeded") &&
-        run.plan.observations.every((o) => !["pending", "running", "waiting"].includes(run.observationStates[o.id] ?? ""))) {
-        this.store.transaction(() => {
-          const current = this.get(run.id);
-          current.status = "awaiting_acceptance"; this.save(current);
-          this.store.event(current.id, "adaptive.run.delivered", { results: Object.keys(current.results) });
-        });
-      } else if (Object.values(run.nodeStates).some((s) => s === "failed") &&
-        !run.plan.observations.some((o) => run.observationStates[o.id] === "pending")) {
-        this.store.transaction(() => {
-          const current = this.get(run.id); current.status = "failed"; this.save(current);
-          this.store.event(current.id, "adaptive.run.failed", { failures: current.failures });
-        });
-      }
-    }
+    }));
   }
   private async executeNode(id: string, nodeId: string) {
     const prepared = this.store.transaction(() => {
