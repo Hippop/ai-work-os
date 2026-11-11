@@ -1,3 +1,7 @@
+import { AssetService } from "../../packages/adaptive/assets.js";
+import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
+import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
+import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join } from "node:path";
@@ -31,6 +35,8 @@ export function createApp(
   token: string,
   service = new WorkService(store),
   dataDir?: string,
+  adaptive = new AdaptiveEngine(store),
+  adaptiveRuntime?: AdaptiveRuntime,
 ) {
   const app = express();
   const resources = new ResourceService(store);
@@ -447,6 +453,82 @@ export function createApp(
       ],
     });
   });
+  // Adaptive Work OS V2: versioned capability/knowledge assets and event-driven runs.
+  const adaptiveAssets = new AssetService(store);
+  const skillSources = new ExternalSkillService(store);
+  app.get("/api/v2/capabilities", (_req, res) => res.json(adaptiveAssets.listCapabilities()));
+  app.post("/api/v2/capabilities", (req, res) =>
+    res.status(201).json(adaptiveAssets.createCapability(req.body)));
+  app.post("/api/v2/capabilities/:id/validate", (req, res) =>
+    res.json(adaptiveAssets.validateCapability(req.params.id, z.object({ evidence: z.string() }).parse(req.body).evidence)));
+  app.post("/api/v2/capabilities/:id/publish", (req, res) => res.json(adaptiveAssets.publishCapability(req.params.id)));
+  app.post("/api/v2/capabilities/:id/revoke", (req, res) => {
+    adaptiveAssets.revokeCapability(req.params.id); res.json({ status: "revoked" });
+  });
+  app.get("/api/v2/profiles", (_req, res) => res.json(store.list("adaptive_profile")));
+  app.post("/api/v2/profiles", (req, res) => res.status(201).json(adaptiveAssets.createProfile(req.body)));
+  app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
+  app.get("/api/v2/knowledge", (_req, res) => res.json(adaptiveAssets.listKnowledge()));
+  app.post("/api/v2/knowledge", (req, res) => res.status(201).json(adaptiveAssets.createKnowledge(req.body)));
+  app.post("/api/v2/knowledge/:id/publish", (req, res) => res.json(adaptiveAssets.publishKnowledge(req.params.id)));
+  app.post("/api/v2/knowledge/:id/revoke", (req, res) => {
+    adaptiveAssets.revokeKnowledge(req.params.id); res.json({ status: "revoked" });
+  });
+  app.get("/api/v2/knowledge-bindings", (_req, res) => res.json(store.list("adaptive_knowledge_binding")));
+  app.post("/api/v2/knowledge-bindings", (req, res) =>
+    res.status(201).json(adaptiveAssets.bindKnowledge(req.body)));
+  app.post("/api/v2/knowledge/search", (req, res) => {
+    const b = z.object({
+      query: z.string().max(2000), projectId: z.string().uuid().nullable().default(null),
+      taskId: z.string().uuid().nullable().default(null), capabilityName: z.string().min(1).max(120),
+    }).parse(req.body);
+    res.json(adaptiveAssets.retrieveKnowledge(b.query, b.projectId, b.taskId, b.capabilityName));
+  });
+  app.get("/api/v2/skill-sources", (_req, res) => res.json(skillSources.sources()));
+  app.post("/api/v2/skill-sources", (req, res) => res.status(201).json(skillSources.register(req.body)));
+  app.post("/api/v2/skill-sources/:id/scan", (req, res) => res.json(skillSources.scan(req.params.id)));
+  app.get("/api/v2/external-skills", (_req, res) => res.json(skillSources.skills()));
+  app.post("/api/v2/skill-candidates", async (req, res) => {
+    const b = z.object({
+      skillId: z.string().uuid(), projectId: z.string().uuid().optional(),
+      profileRef: z.string().optional(), ai: z.boolean().default(false),
+    }).parse(req.body);
+    if (b.ai) {
+      if (!adaptiveRuntime || !b.projectId) throw new DomainError("model_required", "AI 分析需要可用模型和项目", 422);
+      res.status(201).json(await adaptiveRuntime.createSkillCandidate(b.skillId, b.projectId, b.profileRef));
+    } else res.status(201).json(adaptiveAssets.draftFromSkill(b.skillId));
+  });
+  app.post("/api/v2/workflows/validate", (req, res) => {
+    const b = z.object({ projectId: z.string().uuid().nullable().default(null),
+      taskId: z.string().uuid().optional(), plan: z.unknown() }).parse(req.body);
+    res.json({ plan: adaptive.validate(b.plan, b.projectId, b.taskId) });
+  });
+  app.post("/api/v2/tasks/:id/compose", async (req, res) =>
+    res.json({ plan: await adaptive.compose(req.params.id) }));
+  app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
+  app.post("/api/v2/adaptive-runs", (req, res) => {
+    const b = z.object({ taskId: z.string().uuid(), plan: z.unknown() }).parse(req.body);
+    res.status(201).json(adaptive.createRun(b.taskId, b.plan));
+  });
+  app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
+  app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
+  app.get("/api/v2/adaptive-runs/:id/invocations", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_invocation").filter((i) => i.runId === req.params.id)));
+  app.get("/api/v2/adaptive-runs/:id/plan-revisions", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_plan_revision").filter((i) => i.runId === req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/accept", (req, res) => {
+    const b = z.object({ accepted: z.boolean(), reason: z.string().default("") }).parse(req.body);
+    res.json(adaptive.accept(req.params.id, b.accepted, b.reason));
+  });
+  app.post("/api/v2/adaptive-runs/:id/cancel", (req, res) => res.json(adaptive.cancel(req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/retry", (req, res) => {
+    const b = z.object({ nodeId: z.string().min(1) }).parse(req.body);
+    res.json(adaptive.retry(req.params.id, b.nodeId));
+  });
+  app.post("/api/v2/adaptive-runs/:id/observations/:checkpointId/decision", (req, res) =>
+    res.json(adaptive.resolveWaiting(req.params.id, req.params.checkpointId, req.body)));
+  app.get("/api/v2/asset-events/:kind/:id", (req, res) =>
+    res.json(store.events("asset:" + req.params.kind + ":" + req.params.id)));
   app.use("/api", (_req, res) =>
     res.status(404).json({ code: "not_found", message: "接口不存在" }),
   );
