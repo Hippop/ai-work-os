@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Store } from "../persistence/index.js";
 import { DomainError, digest, type Task } from "../domain/index.js";
-import { AssetService, checkSchema, type Capability } from "./assets.js";
+import { AssetService, checkSchema, type Capability, type Profile } from "./assets.js";
+import { ExternalSkillService } from "../external-skills/index.js";
 
 const nodeId = z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/);
 export const PlanNodeInput = z.object({
@@ -33,7 +34,7 @@ type NState = "pending" | "running" | "succeeded" | "failed" | "waiting" | "unce
 type OState = "pending" | "running" | "waiting" | "completed";
 export type AdaptiveRun = {
   id: string; taskId: string; status: "queued" | "running" | "waiting" | "reconciling" | "failed" | "awaiting_acceptance" | "done" | "cancelled";
-  planRevision: number; plan: Plan; snapshots: Record<string, { capability: Capability; profileRef: string | null }>;
+  planRevision: number; plan: Plan; snapshots: Record<string, { capability: Capability; profileRef: string | null; profile: Profile; skillInstructions: { id: string; name: string; content: string; digest: string }[] }>;
   nodeStates: Record<string, NState>; observationStates: Record<string, OState>;
   results: Record<string, { output: unknown; artifactRefs: string[]; invocationId: string; digest: string }>;
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
@@ -165,7 +166,19 @@ export class AdaptiveEngine {
       const snapshots: AdaptiveRun["snapshots"] = {};
       for (const node of plan.nodes) {
         const cap = this.assets.getCapability(node.capabilityRef);
-        snapshots[node.id] = { capability: cap, profileRef: node.profileRef ?? cap.profileRef };
+        const profileRef = node.profileRef ?? cap.profileRef;
+        if (!profileRef) throw new DomainError("profile_required", "未绑定执行配置", 422);
+        const profile = this.assets.getProfile(profileRef);
+        const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
+          .map((skill) => ({ id: skill.id, name: skill.name, content: skill.content, digest: skill.contentDigest }));
+        if (JSON.stringify(skillInstructions).length > 80000)
+          throw new DomainError("skill_context_budget", "Skill 指令快照超过运行预算", 422);
+        if (cap.sourceSkillId) {
+          const source = skillInstructions.find((sk) => sk.id === cap.sourceSkillId);
+          if (!source || source.digest !== cap.sourceDigest)
+            throw new DomainError("source_skill_changed", "能力原始 Skill 已变化，需要验证新版本", 422);
+        }
+        snapshots[node.id] = { capability: cap, profileRef, profile, skillInstructions };
       }
       const run: AdaptiveRun = {
         id, taskId, status: "queued", planRevision: 1, plan, snapshots,
@@ -389,7 +402,16 @@ export class AdaptiveEngine {
       run.observationStates = {}; run.decisions = {}; run.failures = {};
       run.snapshots = Object.fromEntries(plan.nodes.map((n) => {
         const cap = this.assets.getCapability(n.capabilityRef);
-        return [n.id, { capability: cap, profileRef: n.profileRef ?? cap.profileRef }];
+        const profileRef = n.profileRef ?? cap.profileRef;
+        if (!profileRef) throw new DomainError("profile_required", "执行配置缺失", 422);
+        const profile = this.assets.getProfile(profileRef);
+        const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
+          .map((sk) => ({ id: sk.id, name: sk.name, content: sk.content, digest: sk.contentDigest }));
+        if (JSON.stringify(skillInstructions).length > 80000)
+          throw new DomainError("skill_context_budget", "Skill 快照超过预算", 422);
+        if (cap.sourceSkillId && !skillInstructions.some((sk) => sk.id === cap.sourceSkillId && sk.digest === cap.sourceDigest))
+          throw new DomainError("source_skill_changed", "能力原始 Skill 已变化", 422);
+        return [n.id, { capability: cap, profileRef, profile, skillInstructions }];
       }));
       run.status = "running"; this.save(run);
       this.store.put("adaptive_plan_revision", { id: id + ":" + run.planRevision, runId: id,
