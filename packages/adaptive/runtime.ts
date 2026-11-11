@@ -186,7 +186,22 @@ export class AdaptiveRuntime {
         if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
           throw new DomainError("readonly_violation", "只读能力更改了工作区", 422);
         writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
-        return { output, artifacts: [join(folder, "result.json")] };
+        let modelUsage: { inputTokens?: number; outputTokens?: number } | undefined;
+        try {
+          const lines = readFileSync(join(folder, sanitizeName(call.node.id) + ".events.jsonl"), "utf8").split("\\n");
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line);
+            const usage = event?.usage ?? event?.item?.usage;
+            if (event?.type === "turn.completed" && usage) {
+              modelUsage = {
+                inputTokens: usage.input_tokens ?? usage.inputTokens,
+                outputTokens: usage.output_tokens ?? usage.outputTokens,
+              };
+            }
+          }
+        } catch { /* old Codex event formats may omit usage */ }
+        return { output, artifacts: [join(folder, "result.json")], modelUsage };
       } finally { isolated.dispose(); }
     };
   }
