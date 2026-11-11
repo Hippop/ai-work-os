@@ -106,7 +106,8 @@ export class BudgetService {
     });
   }
   /** An operator may record verified provider token usage; it never creates a false zero charge. */
-  reconcile(invocationId:string,inputTokens:number,outputTokens:number,profile:Profile,runBudgetUsd:number|null) {
+  reconcile(invocationId:string,inputTokens:number,outputTokens:number,profile:Profile,runBudgetUsd:number|null,note:string) {
+    if (note.trim().length < 20) throw new DomainError("cost_reconciliation_evidence","必须提供供应商用量核对依据",422);
     if(!verifiedNumber(inputTokens)||!verifiedNumber(outputTokens))
       throw new DomainError("cost_usage_invalid","费用核对需要有效的 token 数",422);
     return this.store.transaction(()=>{
@@ -115,7 +116,7 @@ export class BudgetService {
         throw new DomainError("cost_reconciliation_state","费用不在待核对状态",422);
       this.store.put("adaptive_cost",{...existing,state:"reserved"});
       const result=this.settle(invocationId,{inputTokens,outputTokens},profile,runBudgetUsd);
-      this.store.event(existing.runId,"adaptive.cost.reconciled",{invocationId,inputTokens,outputTokens},"user");
+      this.store.event(existing.runId,"adaptive.cost.reconciled",{invocationId,inputTokens,outputTokens,note},"user");
       return result;
     });
   }
