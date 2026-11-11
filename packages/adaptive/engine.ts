@@ -551,31 +551,51 @@ export class AdaptiveEngine {
       const run = this.get(id);
       if (run.planRevision !== before.planRevision || Object.values(run.nodeStates).includes("running")) throw new DomainError("revision_conflict", "运行状态发生变化");
       const oldNodes = byId(run.plan.nodes), states: AdaptiveRun["nodeStates"] = {}, results: AdaptiveRun["results"] = {};
+      const nextSnapshots: AdaptiveRun["snapshots"] = {};
       for (const node of plan.nodes) {
-        const old = oldNodes.get(node.id);
-        const same = !!old && digest(old) === digest(node) && run.snapshots[node.id]?.capability.id === node.capabilityRef;
+        const cap = this.assets.getCapability(node.capabilityRef);
+        const profileRef = node.profileRef ?? cap.profileRef;
+        if (!profileRef) throw new DomainError("profile_required", "执行配置缺失", 422);
+        const profile = this.assets.getProfile(profileRef);
+        const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
+          .map((sk) => ({ id:sk.id, name:sk.name, content:sk.content, digest:sk.contentDigest }));
+        if (JSON.stringify(skillInstructions).length > 80000)
+          throw new DomainError("skill_context_budget", "Skill 快照超过预算", 422);
+        if (cap.sourceSkillId && !skillInstructions.some((sk) => sk.id === cap.sourceSkillId && sk.digest === cap.sourceDigest))
+          throw new DomainError("source_skill_changed", "能力原始 Skill 已变化", 422);
+        nextSnapshots[node.id] = { capability: cap, profileRef, profile, skillInstructions };
+        const previous = run.snapshots[node.id], old = oldNodes.get(node.id);
+        const same = !!old && digest(old) === digest(node) &&
+          !!previous && digest(previous) === digest(nextSnapshots[node.id]);
         const depsKept = node.dependsOn.every((dep) => states[dep] === "succeeded");
-        states[node.id] = same && depsKept && run.nodeStates[node.id] === "succeeded" ? "succeeded" : "pending";
-        if (states[node.id] === "succeeded") results[node.id] = run.results[node.id];
+        let knowledgeUnchanged = true;
+        if (same && depsKept && run.nodeStates[node.id] === "succeeded") {
+          const invocation = this.store.get<{knowledgeRefs?:{id:string;digest:string}[]}>(
+            "adaptive_invocation", run.results[node.id]?.invocationId ?? "");
+          const currentKnowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, cap.name);
+          const refs = (invocation?.knowledgeRefs ?? []).map((k) => k.id + ":" + k.digest).sort();
+          const current = currentKnowledge.map((k) => k.id + ":" + k.digest).sort();
+          knowledgeUnchanged = JSON.stringify(refs) === JSON.stringify(current);
+        }
+        const retained = same && depsKept && knowledgeUnchanged && run.nodeStates[node.id] === "succeeded";
+        states[node.id] = retained ? "succeeded" : "pending";
+        if (retained) results[node.id] = run.results[node.id];
+      }
+      // A completed write has already changed the worktree. It cannot disappear or be replayed
+      // merely because the planner changed the upstream plan. Require a new downstream write node.
+      for (const [oldId, oldState] of Object.entries(run.nodeStates)) {
+        if (oldState !== "succeeded" ||
+            run.snapshots[oldId]?.capability.sideEffect !== "workspace-write") continue;
+        if (states[oldId] !== "succeeded")
+          throw new DomainError("write_replan_unsafe",
+            "重规划不能删除或重放已经完成的写入能力；请保留原节点并新增后续能力", 409);
       }
       // Non-reused results remain in the history/event log and plan-revision record.
       this.store.put("adaptive_plan_revision", { id: id + ":" + run.planRevision, runId: id, number: run.planRevision,
         plan: run.plan, states: run.nodeStates, results: run.results, reason: decision.reason });
       run.plan = plan; run.planRevision++; run.revisionCount++; run.nodeStates = states; run.results = results;
       run.observationStates = {}; run.decisions = {}; run.failures = {};
-      run.snapshots = Object.fromEntries(plan.nodes.map((n) => {
-        const cap = this.assets.getCapability(n.capabilityRef);
-        const profileRef = n.profileRef ?? cap.profileRef;
-        if (!profileRef) throw new DomainError("profile_required", "执行配置缺失", 422);
-        const profile = this.assets.getProfile(profileRef);
-        const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
-          .map((sk) => ({ id: sk.id, name: sk.name, content: sk.content, digest: sk.contentDigest }));
-        if (JSON.stringify(skillInstructions).length > 80000)
-          throw new DomainError("skill_context_budget", "Skill 快照超过预算", 422);
-        if (cap.sourceSkillId && !skillInstructions.some((sk) => sk.id === cap.sourceSkillId && sk.digest === cap.sourceDigest))
-          throw new DomainError("source_skill_changed", "能力原始 Skill 已变化", 422);
-        return [n.id, { capability: cap, profileRef, profile, skillInstructions }];
-      }));
+      run.snapshots = nextSnapshots;
       run.status = "running"; this.save(run);
       this.store.put("adaptive_plan_revision", { id: id + ":" + run.planRevision, runId: id,
         number: run.planRevision, plan, digest: digest(plan), reason: decision.reason });
