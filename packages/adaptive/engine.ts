@@ -286,6 +286,17 @@ export class AdaptiveEngine {
       return { run, node, capability: cap, profileRef, input, invocationId, task, knowledge };
     });
     if (!prepared) return;
+    const profile = this.assets.getProfile(prepared.profileRef!);
+    if (profile.executor === "manual") {
+      this.store.transaction(() => {
+        const run = this.get(id);
+        const invocation = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
+        run.nodeStates[nodeId] = "waiting"; run.status = "waiting"; this.save(run);
+        this.store.put("adaptive_invocation", { ...invocation, status: "waiting" });
+        this.store.event(id, "adaptive.invocation.waiting_for_user", { nodeId, invocationId: prepared.invocationId });
+      });
+      return;
+    }
     try {
       if (!this.executor) throw new DomainError("executor_unavailable", "未配置能力执行器", 503);
       const response = await this.executor(prepared);
@@ -411,6 +422,52 @@ export class AdaptiveEngine {
       run.decisions[checkpointId] = decision; run.observationStates[checkpointId] = "completed";
       run.status = decision.decision === "STOP" ? "failed" : "running";
       this.save(run); this.store.event(id, "adaptive.observation.manually_resolved", { checkpointId, decision }, "user");
+      return run;
+    });
+  }
+  completeManual(id: string, nodeId: string, output: unknown) {
+    return this.store.transaction(() => {
+      const run = this.get(id);
+      if (run.nodeStates[nodeId] !== "waiting")
+        throw new DomainError("manual_not_waiting", "该节点未等待人工输入", 422);
+      const cap = run.snapshots[nodeId]?.capability;
+      const profile = this.assets.getProfile(run.snapshots[nodeId]?.profileRef ?? "");
+      if (!cap || profile.executor !== "manual")
+        throw new DomainError("manual_forbidden", "不能伪造自动能力执行结果", 403);
+      checkSchema(cap.outputSchema, output);
+      const invocation = this.store.list<any>("adaptive_invocation").find((v) =>
+        v.runId === id && v.nodeId === nodeId && v.status === "waiting");
+      if (!invocation) throw new DomainError("invocation_missing", "待确认调用不存在", 404);
+      this.store.put("adaptive_invocation", { ...invocation, status: "succeeded",
+        finishedAt: new Date().toISOString(), outputDigest: digest(output) });
+      run.nodeStates[nodeId] = "succeeded";
+      run.results[nodeId] = { output, artifactRefs: [], invocationId: invocation.id, digest: digest(output) };
+      this.activateObservations(run, nodeId, "succeeded");
+      run.status = "running"; this.save(run);
+      this.store.event(id, "adaptive.invocation.manually_completed",
+        { nodeId, invocationId: invocation.id, outputDigest: digest(output) }, "user");
+      return run;
+    });
+  }
+  reconcileUncertain(id: string, nodeId: string, stoppedConfirmed: boolean, note: string) {
+    return this.store.transaction(() => {
+      const run = this.get(id);
+      if (run.status !== "reconciling" || run.nodeStates[nodeId] !== "uncertain")
+        throw new DomainError("not_reconciling", "节点不处于待人工核对状态", 422);
+      if (!stoppedConfirmed || note.trim().length < 10)
+        throw new DomainError("recovery_proof_required", "必须人工确认相关进程和外部副作用已核对，并说明依据", 422);
+      const cap = run.snapshots[nodeId]?.capability;
+      if (!cap) throw new DomainError("not_found", "能力快照不存在", 404);
+      // Never automatically replay a write after a crash: put entire run into failed state for explicit new task/revision.
+      if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write") {
+        run.nodeStates[nodeId] = "failed";
+        run.status = "failed";
+      } else {
+        run.nodeStates[nodeId] = "failed";
+        run.status = "waiting";
+      }
+      this.save(run);
+      this.store.event(id, "adaptive.recovery.reconciled", { nodeId, stoppedConfirmed, note, sideEffect: cap.sideEffect }, "user");
       return run;
     });
   }
