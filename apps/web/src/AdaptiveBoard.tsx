@@ -316,6 +316,10 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
           const result = await api("/v2/tasks/" + taskId + "/compose", {});
           setPlan(json(result.plan)); setNotice("Planner 已生成工作流，请检查 DAG 和观察策略后下发");
         })}>使用 Codex 智能编排</button>
+        <button disabled={!taskId} className="quiet" onClick={() => void act(async () => {
+          const result = await api("/v2/tasks/" + taskId + "/standard-plan", {});
+          setPlan(json(result.plan)); setNotice("已生成平台标准工作流（非 AI 编排），请确认后执行");
+        })}>使用标准流程</button>
         <button className="quiet" onClick={makeSample}>根据已发布能力生成编辑示例</button>
       </div>
       <label>工作流定义（DAG + 观察策略）
