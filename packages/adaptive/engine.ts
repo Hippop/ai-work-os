@@ -180,8 +180,20 @@ export class AdaptiveEngine {
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
     const catalog = this.assets.listCapabilities().filter((c) => c.status === "published" && (!c.projectId || c.projectId === task.projectId));
     const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, "workflow.planner");
-    const proposal = await this.planner.compose(task, catalog, knowledge);
-    return this.validate(proposal, task.projectId, task.id);
+    try {
+      const proposal = await this.planner.compose(task, catalog, knowledge);
+      const plan = this.validate(proposal, task.projectId, task.id);
+      this.store.event("task:" + task.id, "adaptive.plan.proposed", {
+        planDigest: digest(plan), capabilityRefs: plan.nodes.map((n) => n.capabilityRef),
+        observationIds: plan.observations.map((o) => o.id),
+      });
+      return plan;
+    } catch (error) {
+      this.store.event("task:" + task.id, "adaptive.plan.rejected", {
+        errorCode: (error as Error).name,
+      });
+      throw error;
+    }
   }
   createRun(taskId: string, planInput: unknown): AdaptiveRun {
     const task = this.store.get<Task>("task", taskId);
