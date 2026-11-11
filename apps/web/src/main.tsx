@@ -741,7 +741,7 @@ function App() {
             />
           )}
           {page === "能力与知识" && <ResourceManager api={api} act={act} />}
-          {page === "自适应工作流" && <AdaptiveBoard api={api} act={act} tasks={tasks} projects={projects} />}
+          {page === "自适应工作流" && <AdaptiveBoard api={api} act={act} token={token} tasks={tasks} projects={projects} />}
           {page === "目标与计划" && (
             <PlanningBoard
               tasks={tasks}
