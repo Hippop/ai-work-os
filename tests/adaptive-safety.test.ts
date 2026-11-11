@@ -151,3 +151,29 @@ test("Skill instructions stay frozen in the adaptive plan when source file chang
     ), /已变化/);
   } finally { store.close(); rmSync(root, { recursive:true, force:true }); }
 });
+
+test("review with blocking risks cannot pass delivery gate", async () => {
+  const store = new Store(":memory:");
+  try {
+    bootstrapAdaptiveAssets(store);
+    const task = new WorkService(store).createTask({
+      title: "Review blocked", objective: "Patch service", type: "development",
+      acceptanceCriteria: ["Review clear"],
+    });
+    const plan = standardAdaptivePlan(task);
+    plan.observations = [];
+    const engine = new AdaptiveEngine(store, new AssetService(store),
+      async ({ node }) => ({
+        output: node.id === "review"
+          ? { summary: "Blocking issue found", evidence: ["artifact://finding"], risks: ["Dangerous race condition"] }
+          : { summary: "Step completed", evidence: [], risks: [] },
+      }));
+    const run = engine.createRun(task.id, plan);
+    for (let i=0; i<7; i++) await engine.tick();
+    const state = engine.get(run.id);
+    assert.equal(state.nodeStates.review, "failed");
+    assert.equal(state.nodeStates.deliver, "pending");
+    assert.equal(state.status, "failed");
+    assert.match(state.failures.review, /未解决的风险/);
+  } finally { store.close(); }
+});
