@@ -10,6 +10,7 @@ const version = z.string().regex(/^\d+\.\d+\.\d+$/);
 const shape = z.record(z.string(), z.unknown());
 export const ExecutionProfileInput = z.object({
   name: key, version,
+  projectId: z.string().uuid().nullable().default(null),
   executor: z.enum(["agent", "program", "project-test", "manual", "builtin"]),
   agent: z.string().max(80).optional(),
   model: z.string().max(150).optional(),
@@ -134,6 +135,8 @@ export class AssetService {
   createProfile(input: unknown): Profile {
     const data = ExecutionProfileInput.parse(input), id = ref(data.name, data.version);
     if (this.store.get("adaptive_profile", id)) throw new DomainError("version_exists", "配置版本已存在");
+    if (data.projectId && !this.store.get("project", data.projectId))
+      throw new DomainError("project_not_found", "执行配置绑定的项目不存在", 422);
     if (data.executor === "program" && !data.program) throw new DomainError("program_required", "程序执行器需要显式程序及参数", 422);
     if (data.executor === "agent" && !data.agent) throw new DomainError("agent_required", "Agent执行器需要指定适配器", 422);
     const profile: Profile = { ...data, id, status: "draft", createdAt: new Date().toISOString() };
@@ -144,7 +147,7 @@ export class AssetService {
     return this.store.transaction(() => {
       const p = this.getProfile(id, false);
       for (const skill of p.skillIds) new ExternalSkillService(this.store).snapshot([skill]);
-      if (p.mcpGrants.length) new McpRegistry(this.store).resolve(p.mcpGrants, null);
+      if (p.mcpGrants.length) new McpRegistry(this.store).resolve(p.mcpGrants, p.projectId);
       const v = { ...p, status: "published" as const };
       this.store.put("adaptive_profile", v); this.record("profile", id, "profile.published", { id });
       return v;
