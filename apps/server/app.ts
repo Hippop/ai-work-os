@@ -8,6 +8,7 @@ import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
 import { BudgetService } from "../../packages/adaptive/budget.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import { AdaptiveAuditService } from "../../packages/adaptive/audit.js";
+import { AdaptiveEvaluationService } from "../../packages/adaptive/evaluation.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
@@ -566,6 +567,15 @@ export function createApp(
   });
   app.post("/api/v2/tasks/:id/compose", async (req, res) =>
     res.json({ plan: await adaptive.compose(req.params.id) }));
+  const evalService = new AdaptiveEvaluationService(store);
+  app.get("/api/v2/evaluations/datasets", (_req, res) =>
+    res.json(evalService.listDatasets()));
+  app.post("/api/v2/evaluations/datasets", (req, res) =>
+    res.status(201).json(evalService.createDataset(req.body)));
+  app.get("/api/v2/evaluations", (_req, res) =>
+    res.json(evalService.listEvaluations()));
+  app.post("/api/v2/evaluations", (req, res) =>
+    res.status(201).json(evalService.evaluate(req.body)));
   app.get("/api/v2/analytics", (req, res) => {
     const params = z.object({
       days: z.coerce.number().int().min(1).max(365).default(30),
