@@ -23,8 +23,8 @@ const defaultOutput = {
 const initialPlan: Flow = {
   nodes: [], observations: [], rationale: "Use published atomic capabilities",
 };
-export function AdaptiveBoard({ api, act, tasks, projects }: {
-  api: API; act: (fn: () => Promise<void>) => Promise<void>;
+export function AdaptiveBoard({ api, act, token, tasks, projects }: {
+  api: API; act: (fn: () => Promise<void>) => Promise<void>; token: string;
   tasks: Task[]; projects: Project[];
 }) {
   const [caps, setCaps] = useState<Item[]>([]);
@@ -63,6 +63,17 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
     const timer = setInterval(() => { void get(); }, 3500);
     return () => clearInterval(timer);
   }, [selectedRun]);
+  async function downloadArtifact(runId:string,nodeId:string,artifactRef:string) {
+    const name=artifactRef.split("/").pop() ?? "";
+    const path="/api/v2/adaptive-runs/"+encodeURIComponent(runId)+
+      "/artifacts/"+encodeURIComponent(nodeId)+"/"+encodeURIComponent(name);
+    const result=await fetch(path,{headers:{Authorization:"Bearer "+token}});
+    if(!result.ok)throw Error("工件下载失败："+result.status);
+    const url=URL.createObjectURL(await result.blob());
+    const link=document.createElement("a");
+    link.href=url;link.download=name;link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
   const current = runs.find((r) => r.id === selectedRun);
   function doForm(event: FormEvent<HTMLFormElement>, fn: (form: FormData) => Promise<unknown>) {
     event.preventDefault(); const form = event.currentTarget;
@@ -495,6 +506,11 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
           <b>{n.id}</b> · {n.capabilityRef} · {current.nodeStates[n.id] ?? "pending"}
           <small> · 依赖：{n.dependsOn.join(", ") || "无"}</small>
           {current.failures[n.id] && <p>{current.failures[n.id]}</p>}
+          {((current.results[n.id] as {artifactRefs?:string[]}|undefined)?.artifactRefs ?? []).map((artifact)=>(
+            <button key={artifact} className="quiet" onClick={() => void act(async () => {
+              await downloadArtifact(current.id,n.id,artifact);
+            })}>下载 {artifact.split("/").pop()}</button>
+          ))}
           {current.nodeStates[n.id] === "waiting" &&
             <button onClick={() => {
               const v = window.prompt("填写符合该能力输出 Schema 的 JSON");
