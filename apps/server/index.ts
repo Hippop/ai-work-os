@@ -43,13 +43,23 @@ bootstrapAdaptiveAssets(store);
 const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
 const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
 adaptive.recover();
-let adaptiveBusy = false;
-const adaptiveTimer = setInterval(() => {
-  if (adaptiveBusy) return;
+let adaptiveBusy = false, adaptivePending = false;
+function driveAdaptive() {
+  if (adaptiveBusy) { adaptivePending = true; return; }
   adaptiveBusy = true;
   void adaptive.tick().catch((error) => console.error("Adaptive scheduler error", error))
-    .finally(() => { adaptiveBusy = false; });
-}, 1000);
+    .finally(() => {
+      adaptiveBusy = false;
+      if (adaptivePending) {
+        adaptivePending = false;
+        setImmediate(driveAdaptive);
+      }
+    });
+}
+adaptive.setWake(() => setImmediate(driveAdaptive));
+// Event wakeups are primary; slower periodic sweep is crash/lost-notification recovery.
+const adaptiveTimer = setInterval(driveAdaptive, 10000);
+driveAdaptive();
 const optimization = new OptimizationService(store, dataDir, runtime);
 const optimizationTimer = setInterval(() => {
   try {
