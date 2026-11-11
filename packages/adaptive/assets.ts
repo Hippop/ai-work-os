@@ -160,6 +160,29 @@ export class AssetService {
     this.store.transaction(() => { this.store.put("adaptive_capability", cap); this.record("capability", id, "capability.created", { id, sourceSkillId: data.sourceSkillId }); });
     return cap;
   }
+  updateCandidate(id: string, input: unknown): Capability {
+    const patch = z.object({
+      title: z.string().trim().min(1).max(160).optional(),
+      description: z.string().trim().min(1).max(4000).optional(),
+      inputSchema: shape.optional(), outputSchema: shape.optional(),
+      tags: z.array(z.string().max(60)).max(30).optional(),
+      profileRef: z.string().max(180).nullable().optional(),
+      sideEffect: z.enum(["none", "read", "workspace-write", "external-write"]).optional(),
+    }).strict().parse(input);
+    return this.store.transaction(() => {
+      const old = this.getCapability(id, false);
+      if (old.status !== "candidate") throw new DomainError("candidate_only", "已验证或已发布版本不可覆盖", 422);
+      const data = CapabilityInput.parse({ ...old, ...patch });
+      checkSchema(data.inputSchema); checkSchema(data.outputSchema);
+      if (data.profileRef) this.getProfile(data.profileRef);
+      const next: Capability = { ...old, ...data };
+      this.store.put("adaptive_capability", next);
+      this.record("capability", id, "capability.candidate_updated", {
+        id, previousDigest: digest(old), nextDigest: digest(next),
+      });
+      return next;
+    });
+  }
   validateCapability(id: string, evidence: string): Capability {
     if (!evidence.trim() || evidence.length > 4000) throw new DomainError("validation_evidence_required", "请提供契约验证依据", 422);
     return this.store.transaction(() => {
