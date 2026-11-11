@@ -122,7 +122,9 @@ test("Skill instructions stay frozen in the adaptive plan when source file chang
     const outputSchema = { type: "object", properties: { summary: { type: "string" }, evidence: { type: "array", items: { type: "string" } }, risks: { type: "array", items: { type: "string" } } }, required: ["summary", "evidence", "risks"], additionalProperties: false };
     const draft = assets.draftFromSkill(sourceId);
     assets.updateCandidate(draft.id, { profileRef: profile.id });
-    assets.validateCapability(draft.id, "Input-output contract manually verified");
+    assets.validateCapability(draft.id, "Input-output contract manually verified", {
+      input: { objective: "Review code" }, output: { summary: "Reviewed", evidence: [], risks: [] },
+    });
     assets.publishCapability(draft.id);
     const builtin = assets.publishProfile(assets.createProfile({
       name: "builtin.deliver", version: "1.0.0", executor: "builtin",
