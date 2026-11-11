@@ -20,6 +20,7 @@ import {
 } from "../../packages/resources/index.js";
 import {
   DomainError,
+  FlowRequirementsInput,
   type Run,
   type Task,
   digest,
@@ -287,6 +288,22 @@ export function createApp(
         body.reason,
       ),
     );
+  });
+  app.post("/api/v1/flows/preview", (req, res) => {
+    const input = z.object({
+      type: z.enum(["development", "diagnosis"]),
+      projectId: z.string().uuid().nullable().default(null),
+      workflowVersionId: z.string().uuid().nullable().default(null),
+      resourceFamilyIds: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(30).default([]),
+      flowRequirements: FlowRequirementsInput.nullable().default(null),
+    }).parse(req.body);
+    if (input.projectId && !store.get("project", input.projectId))
+      throw new DomainError("not_found", "项目不存在", 404);
+    const context = resources.context(
+      [], [], input.workflowVersionId, input.projectId,
+      input.type, input.resourceFamilyIds, undefined, input.flowRequirements,
+    );
+    res.json({ plan: context.plan, workflow: context.workflow });
   });
   app.post("/api/v1/tasks", (req, res) =>
     res.status(201).json(service.createTask(req.body)),
