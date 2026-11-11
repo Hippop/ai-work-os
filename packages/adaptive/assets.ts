@@ -3,6 +3,7 @@ import { z } from "zod";
 import { DomainError, digest } from "../domain/index.js";
 import { Store } from "../persistence/index.js";
 import { ExternalSkillService } from "../external-skills/index.js";
+import { McpRegistry } from "./mcp.js";
 
 const key = z.string().regex(/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/).max(120);
 const version = z.string().regex(/^\d+\.\d+\.\d+$/);
@@ -143,6 +144,7 @@ export class AssetService {
     return this.store.transaction(() => {
       const p = this.getProfile(id, false);
       for (const skill of p.skillIds) new ExternalSkillService(this.store).snapshot([skill]);
+      if (p.mcpGrants.length) new McpRegistry(this.store).resolve(p.mcpGrants, null);
       const v = { ...p, status: "published" as const };
       this.store.put("adaptive_profile", v); this.record("profile", id, "profile.published", { id });
       return v;
