@@ -9,6 +9,8 @@ import { probeCodex } from "../../packages/runtime/adapter.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import { OptimizationService } from "../../packages/optimization/index.js";
 import { acquireController } from "../../packages/runtime/recovery.js";
+import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
+import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 
 const dataDir =
   process.env.AI_WORK_OS_DATA_DIR ??
@@ -36,6 +38,16 @@ const supervisor = new Supervisor(
   process.env.AI_WORK_OS_CODEX ?? "codex",
 );
 supervisor.start();
+const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
+const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
+adaptive.recover();
+let adaptiveBusy = false;
+const adaptiveTimer = setInterval(() => {
+  if (adaptiveBusy) return;
+  adaptiveBusy = true;
+  void adaptive.tick().catch((error) => console.error("Adaptive scheduler error", error))
+    .finally(() => { adaptiveBusy = false; });
+}, 1000);
 const optimization = new OptimizationService(store, dataDir, runtime);
 const optimizationTimer = setInterval(() => {
   try {
@@ -44,7 +56,7 @@ const optimizationTimer = setInterval(() => {
     console.error("Optimization scheduler error", error);
   }
 }, 30000);
-const server = createApp(store, token, service, dataDir).listen(
+const server = createApp(store, token, service, dataDir, adaptive, adaptiveRuntime).listen(
   port,
   "127.0.0.1",
   () => {
@@ -57,8 +69,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
   process.on(signal, () =>
     server.close(() => {
       clearInterval(optimizationTimer);
-      void supervisor
-        .close()
+      clearInterval(adaptiveTimer);
+      adaptive.close();
+      void Promise.all([supervisor.close(), adaptiveRuntime.close()])
         .then(() => {
           releaseController();
           store.close();
