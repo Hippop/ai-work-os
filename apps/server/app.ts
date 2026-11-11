@@ -524,6 +524,8 @@ export function createApp(
   });
   app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
+  app.get("/api/v2/adaptive-runs/:id/side-effects", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_side_effect").filter((item) => item.runId === req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/invocations", (req, res) =>
     res.json(store.list<{ runId: string }>("adaptive_invocation").filter((i) => i.runId === req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/plan-revisions", (req, res) =>
