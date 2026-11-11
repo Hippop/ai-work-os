@@ -412,6 +412,7 @@ export class AdaptiveEngine {
     const before = this.get(id), decision = before.decisions[checkpointId];
     if (!decision || decision.decision !== "REPLAN") throw new DomainError("replan_not_requested", "没有有效重规划决策", 422);
     if (!this.planner) throw new DomainError("planner_unavailable", "未配置编排 Agent", 503);
+    if (before.status === "reconciling") throw new DomainError("recovery_required", "必须先核对未确认的执行副作用", 409);
     if (before.revisionCount >= 5) throw new DomainError("replan_limit", "已达到重规划上限", 422);
     if (Object.values(before.nodeStates).includes("running")) throw new DomainError("active_invocation", "执行中节点不能热替换", 409);
     const task = this.store.get<Task>("task", before.taskId)!;
@@ -524,7 +525,16 @@ export class AdaptiveEngine {
         run.status = "waiting";
       }
       this.save(run);
-      this.store.event(id, "adaptive.recovery.reconciled", { nodeId, stoppedConfirmed, note, sideEffect: cap.sideEffect }, "user");
+      for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
+        x.runId === id && x.nodeId === nodeId && x.status === "uncertain")) {
+        this.store.put("adaptive_invocation", { ...invocation, status: "reconciled", reconciliationNote: note });
+        const effect = this.store.get<any>("adaptive_side_effect", invocation.id);
+        if (effect) this.store.put("adaptive_side_effect", {
+          ...effect, state: "reconciled", note, confirmedStopped: stoppedConfirmed, at: new Date().toISOString(),
+        });
+      }
+      this.store.event(id, "adaptive.recovery.reconciled",
+        { nodeId, stoppedConfirmed, note, sideEffect: cap.sideEffect }, "user");
       return run;
     });
   }
@@ -546,6 +556,8 @@ export class AdaptiveEngine {
       if (Object.values(run.nodeStates).includes("running") || Object.values(run.nodeStates).includes("uncertain"))
         throw new DomainError("unsafe_cancel", "执行器未确认停止，无法直接释放工作流", 409);
       run.status = "cancelled"; this.save(run);
+      const task = this.store.get<Task>("task", run.taskId);
+      if (task) this.store.put("task", { ...task, status: "planned", updatedAt: new Date().toISOString() });
       this.store.event(id, "adaptive.run.cancelled", {}, "user"); return run;
     });
   }
