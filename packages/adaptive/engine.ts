@@ -369,6 +369,21 @@ export class AdaptiveEngine {
       this.busy.add(snapshot.id);
       try {
         let run = this.get(snapshot.id);
+        const task = this.store.get<Task>("task", run.taskId);
+        const expiresAt = Date.parse(run.createdAt) + (task?.maxMinutes ?? 30) * 60_000;
+        if (Date.now() > expiresAt) {
+          this.store.transaction(() => {
+            const stale = this.get(run.id);
+            if (!["queued", "running"].includes(stale.status)) return;
+            stale.status = "failed";
+            this.save(stale);
+            this.store.event(run.id, "adaptive.budget.time_exceeded", {
+              taskId:run.taskId, maxMinutes:task?.maxMinutes ?? 30,
+              elapsedMinutes:Math.floor((Date.now()-Date.parse(stale.createdAt))/60000),
+            });
+          });
+          return;
+        }
         let readyNodes = this.ready(run);
         // Resolve false conditions before launching work; repeated passes propagate branch skips.
         while (this.skipConditional(run.id, readyNodes)) {
