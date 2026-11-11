@@ -192,7 +192,9 @@ function App() {
       setPrepared({
         ...result,
         taskId: task.id,
-        plan: result.manifest.context.plan,
+        plan: task.type === "manual"
+          ? [{ key: "manual", operation: "manual", title: "人工执行与成果提交", dependsOn: [] }]
+          : result.manifest.context.plan,
       });
     });
   }
