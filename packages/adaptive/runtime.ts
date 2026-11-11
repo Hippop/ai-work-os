@@ -7,7 +7,7 @@ import { DomainError, digest, type Project, type Task } from "../domain/index.js
 import { Store } from "../persistence/index.js";
 import { ExternalSkillService } from "../external-skills/index.js";
 import { execute, executablePath, runAgent, stopTree } from "../runtime/adapter.js";
-import { createWorkspace, git, workspaceDigest } from "../workspace/index.js";
+import { createWorkspace, exportChanges, git, workspaceDigest } from "../workspace/index.js";
 import { PlanInput, DecisionInput, type CapabilityCall, type Executor, type Planner, type AdaptiveRun, type EvalCall } from "./engine.js";
 import { AssetService, CapabilityInput, type Capability } from "./assets.js";
 import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
@@ -116,9 +116,36 @@ export class AdaptiveRuntime {
       const project = call.task.projectId ? this.store.get<Project>("project", call.task.projectId) : undefined;
       if (profile.executor === "manual") throw new DomainError("manual_required", "人工能力需要外部确认", 422);
       if (profile.executor === "builtin") {
-        if (call.capability.tags.includes("deliver"))
-          return { output: { summary: "Workflow completed", evidence: call.node.dependsOn, risks: [] } };
-        return { output: { summary: "Builtin capability recorded input", evidence: [], risks: [], input: call.input } };
+        if (call.capability.tags.includes("deliver")) {
+          const prior = Object.entries(call.run.results)
+            .filter(([id]) => id !== call.node.id)
+            .map(([id,result]) => ({ nodeId:id, outputDigest:result.digest,
+              artifactRefs:result.artifactRefs }));
+          const report = {
+            summary: "Execution outputs collected for human acceptance",
+            evidence: prior.map((item) => item.nodeId + ":" + item.outputDigest),
+            risks: [],
+          };
+          const folder = join(this.dataDir, "adaptive", "deliveries", call.run.id);
+          mkdirSync(folder, { recursive: true, mode: 0o700 });
+          const artifacts = [join(folder, "delivery.json")];
+          const workspace = this.store.get<{path:string}>("adaptive_workspace", call.run.id);
+          if (workspace) {
+            const exportFiles = exportChanges(workspace.path, folder);
+            artifacts.push(...exportFiles.map((filename) => join(folder, filename)));
+          }
+          writeFileSync(join(folder, "delivery.json"), JSON.stringify({
+            runId:call.run.id, taskId:call.task.id, planRevision:call.run.planRevision,
+            result:report, prior, generatedAt:new Date().toISOString(),
+            artifacts:artifacts.map((filename)=>filename.slice(folder.length+1)),
+          }, null, 2), {mode:0o600});
+          this.store.event(call.run.id, "adaptive.delivery.artifacts_generated", {
+            filenames: artifacts.map((filename)=>filename.slice(folder.length+1)),
+            priorResults: prior.length,
+          });
+          return { output: report, artifacts };
+        }
+        return { output: { summary: "Builtin capability recorded input", evidence: [], risks: [] } };
       }
       if (!project) throw new DomainError("project_required", "执行能力必须关联项目", 422);
       if (!project.allowAgent) throw new DomainError("agent_not_authorized", "项目未授权 Agent 执行", 422);
