@@ -86,9 +86,9 @@ test("per-task flow overrides template without replacing published version, and 
     });
     const prepared = service.prepare(task.id);
     assert.equal(prepared.manifest.context.plan.length, 7);
-    assert.equal(prepared.manifest.context.workflow.id, template.id);
+    assert.equal(prepared.manifest.context.workflow?.id, template.id);
     assert.match(prepared.manifest.workflowVersion, /task-compose/);
-    assert.equal(prepared.manifest.task.flowRequirements.instructions,
+    assert.equal(prepared.manifest.task.flowRequirements?.instructions,
       "Maintain backwards compatibility");
     assert.equal(resources.resolve([template.id], "workflow", null)[0].nodes?.length, 6);
     const edited = service.updateTask(task.id, task.revision, {
