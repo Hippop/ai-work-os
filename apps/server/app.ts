@@ -463,8 +463,13 @@ export function createApp(
     res.status(201).json(adaptiveAssets.createCapability(req.body)));
   app.post("/api/v2/capabilities/:id/candidate", (req, res) =>
     res.json(adaptiveAssets.updateCandidate(req.params.id, req.body)));
-  app.post("/api/v2/capabilities/:id/validate", (req, res) =>
-    res.json(adaptiveAssets.validateCapability(req.params.id, z.object({ evidence: z.string() }).parse(req.body).evidence)));
+  app.post("/api/v2/capabilities/:id/validate", (req, res) => {
+    const b = z.object({
+      evidence: z.string(),
+      sample: z.object({ input: z.unknown(), output: z.unknown() }).optional(),
+    }).parse(req.body);
+    res.json(adaptiveAssets.validateCapability(req.params.id, b.evidence, b.sample));
+  });
   app.post("/api/v2/capabilities/:id/publish", (req, res) => res.json(adaptiveAssets.publishCapability(req.params.id)));
   app.post("/api/v2/capabilities/:id/revoke", (req, res) => {
     adaptiveAssets.revokeCapability(req.params.id); res.json({ status: "revoked" });
