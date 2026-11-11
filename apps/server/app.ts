@@ -5,6 +5,7 @@ import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { McpRegistry } from "../../packages/adaptive/mcp.js";
 import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
+import { BudgetService } from "../../packages/adaptive/budget.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import express from "express";
 import { z, ZodError } from "zod";
@@ -573,8 +574,34 @@ export function createApp(
   });
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
   app.post("/api/v2/adaptive-runs", (req, res) => {
-    const b = z.object({ taskId: z.string().uuid(), plan: z.unknown() }).parse(req.body);
-    res.status(201).json(adaptive.createRun(b.taskId, b.plan));
+    const b = z.object({
+      taskId: z.string().uuid(), plan: z.unknown(),
+      budgetUsd: z.number().finite().positive().max(1000).nullable().default(null),
+    }).parse(req.body);
+    res.status(201).json(adaptive.createRun(b.taskId, b.plan, b.budgetUsd));
+  });
+  app.get("/api/v2/adaptive-runs/:id/costs", (req, res) => {
+    adaptive.get(req.params.id);
+    const costs = new BudgetService(store).list(req.params.id);
+    res.json({
+      costs,
+      runBudgetUsd: adaptive.get(req.params.id).budgetUsd ?? null,
+      spentMicroUsd: costs.reduce((sum,x)=>sum+(x.actualMicroUsd??0),0),
+      reservedMicroUsd: costs.filter((x)=>x.state==="reserved")
+        .reduce((sum,x)=>sum+x.reservedMicroUsd,0),
+      unverifiedCount: costs.filter((x)=>["unverified","overrun"].includes(x.state)).length,
+    });
+  });
+  app.post("/api/v2/adaptive-runs/:id/costs/:invocationId/reconcile", (req, res) => {
+    const run = adaptive.get(req.params.id);
+    const record = new BudgetService(store).list(run.id).find((c)=>c.id===req.params.invocationId);
+    if (!record) throw new DomainError("cost_not_found","该运行没有对应费用记录",404);
+    const profile = adaptiveAssets.getProfile(record.profileRef);
+    const b = z.object({
+      inputTokens:z.number().int().nonnegative(),
+      outputTokens:z.number().int().nonnegative(),
+    }).strict().parse(req.body);
+    res.json(new BudgetService(store).reconcile(record.id,b.inputTokens,b.outputTokens,profile,run.budgetUsd??null));
   });
   app.post("/api/v2/adaptive-runs/:id/extract-knowledge", async (req, res) => {
     const b = z.object({
