@@ -602,8 +602,9 @@ export function createApp(
     const b = z.object({
       inputTokens:z.number().int().nonnegative(),
       outputTokens:z.number().int().nonnegative(),
+      note:z.string().trim().min(20).max(3000),
     }).strict().parse(req.body);
-    res.json(new BudgetService(store).reconcile(record.id,b.inputTokens,b.outputTokens,profile,run.budgetUsd??null));
+    res.json(new BudgetService(store).reconcile(record.id,b.inputTokens,b.outputTokens,profile,run.budgetUsd??null,b.note));
   });
   app.post("/api/v2/adaptive-runs/:id/extract-knowledge", async (req, res) => {
     const b = z.object({
