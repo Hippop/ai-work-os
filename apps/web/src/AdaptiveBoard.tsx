@@ -213,6 +213,14 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
         <b>{c.id}</b> · {c.status} · {c.profileRef ?? "未绑定配置"}
         <p>{c.description}</p>
         {c.status === "candidate" && <button className="quiet" onClick={() => {
+          const profileRef = window.prompt("绑定已发布的 Execution Profile ID（例如 review.readonly@1.0.0）", c.profileRef ?? "");
+          if (profileRef === null || !profileRef.trim()) return;
+          void act(async () => {
+            await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/candidate", { profileRef: profileRef.trim() });
+            setNotice("已绑定执行配置；验证前仍可更新候选契约"); await load();
+          });
+        }}>绑定执行配置</button>}
+        {c.status === "candidate" && <button className="quiet" onClick={() => {
           const evidence = window.prompt("请填写真实的契约验证结果及依据（不是模型推断）");
           if (!evidence) return;
           void act(async () => { await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/validate", { evidence }); await load(); });
