@@ -219,7 +219,8 @@ export class AdaptiveRuntime {
       try {
         const output = await runAgent({ ...job, env: isolated.env },
           sanitizeName(call.node.id), prompt, this.child,
-          profile.workspaceMode === "worktree-write" ? "implement" : "analyze");
+          profile.workspaceMode === "worktree-write" ? "implement" : "analyze",
+          call.capability.outputSchema);
         if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
           throw new DomainError("readonly_violation", "只读能力更改了工作区", 422);
         writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
