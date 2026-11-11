@@ -65,6 +65,9 @@ function byId<T extends { id: string }>(items: T[]) { return new Map(items.map((
 export class AdaptiveEngine {
   private busy = new Set<string>();
   private stopping = false;
+  private wake?: () => void;
+  setWake(handler: () => void) { this.wake = handler; }
+  private notify() { this.wake?.(); }
   constructor(public store: Store, public assets = new AssetService(store),
     public executor?: Executor, public planner?: Planner) {}
   validate(input: unknown, projectId: string | null, taskId?: string): Plan {
@@ -159,7 +162,7 @@ export class AdaptiveEngine {
     const task = this.store.get<Task>("task", taskId);
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
     const plan = this.validate(planInput, task.projectId, task.id);
-    return this.store.transaction(() => {
+    const created = this.store.transaction(() => {
       if (this.store.list<AdaptiveRun>("adaptive_run").some((r) => r.taskId === task.id && !["done", "failed", "cancelled"].includes(r.status)))
         throw new DomainError("active_run", "任务已有活跃的自适应运行");
       const id = randomUUID(), now = new Date().toISOString();
@@ -192,6 +195,8 @@ export class AdaptiveEngine {
       this.store.put("task", { ...task, status: "in_progress", updatedAt: now });
       return run;
     });
+    this.notify();
+    return created;
   }
   get(id: string) {
     const run = this.store.get<AdaptiveRun>("adaptive_run", id);
@@ -253,15 +258,17 @@ export class AdaptiveEngine {
       if (this.busy.has(snapshot.id) || !["queued", "running"].includes(snapshot.status)) continue;
       const run = this.get(snapshot.id);
       const pendingObs = run.plan.observations.find((o) => run.observationStates[o.id] === "pending");
-      if (pendingObs) {
+      const readyNode = this.ready(run);
+      // Advisory observations do not halt ready work; barrier observations do.
+      if (pendingObs && (pendingObs.barrier || !readyNode)) {
         this.busy.add(run.id);
-        try { await this.observe(run.id, pendingObs.id); } finally { this.busy.delete(run.id); }
+        try { await this.observe(run.id, pendingObs.id); } finally { this.busy.delete(run.id); this.notify(); }
         continue;
       }
-      const node = this.ready(run);
+      const node = readyNode;
       if (node) {
         this.busy.add(run.id);
-        try { await this.executeNode(run.id, node.id); } finally { this.busy.delete(run.id); }
+        try { await this.executeNode(run.id, node.id); } finally { this.busy.delete(run.id); this.notify(); }
       } else if (run.plan.nodes.every((n) => run.nodeStates[n.id] === "succeeded") &&
         run.plan.observations.every((o) => !["pending", "running", "waiting"].includes(run.observationStates[o.id] ?? ""))) {
         this.store.transaction(() => {
