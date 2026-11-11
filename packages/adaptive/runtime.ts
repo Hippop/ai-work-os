@@ -10,6 +10,7 @@ import { execute, executablePath, runAgent, stopTree } from "../runtime/adapter.
 import { createWorkspace, git, workspaceDigest } from "../workspace/index.js";
 import { PlanInput, DecisionInput, type CapabilityCall, type Executor, type Planner, type AdaptiveRun, type EvalCall } from "./engine.js";
 import { AssetService, CapabilityInput, type Capability } from "./assets.js";
+import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
 
 function strict(schema: any): any {
   if (Array.isArray(schema)) return schema.map(strict);
@@ -48,10 +49,14 @@ export class AdaptiveRuntime {
       "--sandbox", "read-only", "-C", workDir,
       "--output-schema", schemaFile, "-o", resultFile, prompt];
     const deadline = Date.now() + 5 * 60_000;
-    const result = await execute(this.command(), args, workDir, deadline, this.child);
-    if (result.code !== 0) throw new Error("Codex " + kind + " failed: " + result.stderr.slice(0, 800));
-    const parsed = JSON.parse(readFileSync(resultFile, "utf8")) as unknown;
-    return parse(parsed);
+    const isolated = isolatedCodexHome(renderMcpConfig([]));
+    try {
+      const result = await execute(this.command(), args, workDir, deadline, this.child,
+        { env: isolated.env });
+      if (result.code !== 0) throw new Error("Codex " + kind + " failed: " + result.stderr.slice(0, 800));
+      const parsed = JSON.parse(readFileSync(resultFile, "utf8")) as unknown;
+      return parse(parsed);
+    } finally { isolated.dispose(); }
   }
   planner(): Planner {
     return {
@@ -121,7 +126,7 @@ export class AdaptiveRuntime {
           JSON.stringify(profile.program.args) !== JSON.stringify(project.testCommand.args)))
           throw new DomainError("program_not_allowed", "只能执行项目已授权的测试命令", 403);
       }
-      if (profile.mcpGrants.length) throw new DomainError("mcp_isolation_missing", "尚未实现逐 Profile 的 MCP 权限隔离，拒绝执行", 422);
+      const mcp = new McpRegistry(this.store).resolve(profile.mcpGrants, call.task.projectId);
       const folder = join(this.dataDir, "adaptive", "invocations", call.run.id, call.invocationId);
       mkdirSync(folder, { recursive: true, mode: 0o700 });
       let workspace = project.repositoryPath;
@@ -170,12 +175,16 @@ export class AdaptiveRuntime {
         deadline: Date.now() + profile.timeoutSeconds * 1000, model: profile.model ?? this.model,
         context: { knowledge: call.knowledge.map((x) => ({ id:x.id, digest:x.digest })) },
       };
-      const output = await runAgent(job, sanitizeName(call.node.id), prompt, this.child,
-        profile.workspaceMode === "worktree-write" ? "implement" : "analyze");
-      if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
-        throw new DomainError("readonly_violation", "只读能力更改了工作区", 422);
-      writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
-      return { output, artifacts: [join(folder, "result.json")] };
+      const isolated = isolatedCodexHome(renderMcpConfig(mcp));
+      try {
+        const output = await runAgent({ ...job, env: isolated.env },
+          sanitizeName(call.node.id), prompt, this.child,
+          profile.workspaceMode === "worktree-write" ? "implement" : "analyze");
+        if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
+          throw new DomainError("readonly_violation", "只读能力更改了工作区", 422);
+        writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
+        return { output, artifacts: [join(folder, "result.json")] };
+      } finally { isolated.dispose(); }
     };
   }
   async createSkillCandidate(skillId: string, projectId: string, profileRef?: string): Promise<Capability> {
