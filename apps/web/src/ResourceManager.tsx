@@ -79,7 +79,7 @@ export function ResourceManager({
           });
         }}>
           <label>Skill 来源目录绝对路径
-            <input name="path" placeholder="例如 C:\\Users\\me\\.agents\\skills" required />
+            <input name="path" placeholder="例如 /home/user/.agents/skills" required />
           </label>
           <button>注册并扫描</button>
         </form>
