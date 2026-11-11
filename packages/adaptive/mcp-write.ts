@@ -207,7 +207,7 @@ export class McpWriteService {
     if (note.trim().length < 20) throw new DomainError("reconcile_note", "必须提供外部状态核验依据", 422);
     return this.store.transaction(() => {
       const item = this.get(id);
-      if (!["uncertain","executing"].includes(item.status))
+      if (item.status !== "uncertain")
         throw new DomainError("not_uncertain", "该请求不需要核对", 422);
       const updated:WriteIntent = { ...item,status:"reconciled",reconciliation:note };
       this.store.put("adaptive_mcp_write",updated);
