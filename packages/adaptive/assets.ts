@@ -20,6 +20,7 @@ export const ExecutionProfileInput = z.object({
     actions: z.array(z.string().min(1).max(120)).max(30),
   })).max(20).default([]),
   workspaceMode: z.enum(["none", "read-only", "worktree-write"]).default("none"),
+  workspaceSubdir: z.string().trim().min(1).max(240).regex(/^\.$|^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9._-]+)*$/).default("."),
   program: z.object({
     executable: z.string().min(1).max(1024),
     args: z.array(z.string().max(1000)).max(50).default([]),
