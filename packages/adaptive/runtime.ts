@@ -147,6 +147,10 @@ export class AdaptiveRuntime {
       const profile = call.run.snapshots[call.node.id]?.profile;
       if (!profile || profile.id !== call.profileRef)
         throw new DomainError("profile_snapshot_missing", "执行配置快照无效", 422);
+      const taskDeadline = Date.parse(call.run.createdAt) + call.task.maxMinutes * 60_000;
+      const deadline = Math.min(Date.now() + profile.timeoutSeconds * 1000, taskDeadline);
+      if (deadline <= Date.now())
+        throw new DomainError("task_time_budget", "任务总时间预算已用尽", 422);
       const project = call.task.projectId ? this.store.get<Project>("project", call.task.projectId) : undefined;
       if (profile.executor === "manual") throw new DomainError("manual_required", "人工能力需要外部确认", 422);
       if (profile.executor === "builtin") {
@@ -219,7 +223,7 @@ export class AdaptiveRuntime {
         const before = workspaceDigest(workspace);
         const program = profile.executor === "project-test" ? project.testCommand! : profile.program!;
         const r = await execute(program.executable, program.args, workingDirectory,
-          Date.now() + profile.timeoutSeconds * 1000, this.child,
+          deadline, this.child,
           { cgroup: this.containment(profile) });
         if (r.code !== 0) throw new Error("Program returned " + r.code + ": " + r.stderr.slice(0, 800));
         if (workspaceDigest(workspace) !== before)
@@ -248,7 +252,7 @@ export class AdaptiveRuntime {
         command: this.command(), commandPrefix: [], cgroup: this.containment(profile),
         objective: call.task.objective,
         criteria: call.task.acceptanceCriteria, testCommand: project.testCommand ?? { executable:"true", args: [] },
-        deadline: Date.now() + profile.timeoutSeconds * 1000, model: profile.model ?? this.model,
+        deadline, model: profile.model ?? this.model,
         context: { knowledge: call.knowledge.map((x) => ({ id:x.id, digest:x.digest })) },
       };
       const isolated = isolatedCodexHome(renderMcpConfig(mcp));
