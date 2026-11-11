@@ -46,6 +46,8 @@ export class WorkService {
   }
   createTask(input: unknown): Task {
     const data = TaskInput.parse(input);
+    if (data.type === "manual" && data.flowRequirements)
+      throw new DomainError("manual_flow", "人工任务不支持Agent流程配置", 422);
     if (data.projectId) this.required("project", data.projectId);
     const now = new Date().toISOString();
     const task: Task = {
@@ -107,7 +109,12 @@ export class WorkService {
           "active_run",
           "执行期间请先暂停并结束当前运行，再修改任务",
         );
+      if (this.store.list<{taskId:string;status:string}>("adaptive_run").some((run) =>
+        run.taskId === id && !["done","cancelled","failed"].includes(run.status)))
+        throw new DomainError("active_run", "该任务已有活跃的自适应运行，不能修改", 409);
       const data = TaskInput.parse({ ...task, ...(input as object) });
+      if (data.type === "manual" && data.flowRequirements)
+        throw new DomainError("manual_flow", "人工任务不支持Agent流程配置", 422);
       if (data.projectId) this.required("project", data.projectId);
       const updated = {
         ...task,
@@ -213,6 +220,7 @@ export class WorkService {
         taskId: task.id,
         runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
       },
+      task.flowRequirements,
       task.externalSkillIds,
     );
     if (context.canaryBindings.length)
@@ -252,8 +260,10 @@ export class WorkService {
       },
       project,
       baseCommit,
-      workflowVersion: context.workflow
-        ? `${context.workflow.name}@${context.workflow.version}`
+      workflowVersion: task.flowRequirements && task.flowRequirements.mode !== "standard"
+        ? `task-${task.flowRequirements.mode}@1.0.0`
+        : context.workflow
+          ? `${context.workflow.name}@${context.workflow.version}`
         : task.type === "diagnosis"
           ? "incident-diagnosis@1.0.0"
           : "feature-development@1.0.0",
@@ -321,6 +331,9 @@ export class WorkService {
           .some((r) => r.taskId === id && !terminal.has(r.status))
       )
         throw new DomainError("active_run", "该任务已有活跃运行");
+      if (this.store.list<{taskId:string;status:string}>("adaptive_run").some((run) =>
+        run.taskId === id && !["done","cancelled","failed"].includes(run.status)))
+        throw new DomainError("active_run", "该任务已有活跃的自适应运行，不能启动旧执行路径", 409);
       const task = this.required<Task>("task", id),
         now = new Date().toISOString();
       const run: Run = {
@@ -435,7 +448,7 @@ export class WorkService {
         if (action === "resume" && run.status === "paused") {
           const frozenTask = run.manifest.task as Task;
           const frozenContext = run.manifest.context as {
-            skills: { id: string; external?: { sourceId: string } }[];
+            skills: { id: string }[];
             knowledge: { id: string }[];
             workflow: { id: string } | null;
             canaryBindings?: {
@@ -484,7 +497,7 @@ export class WorkService {
                   })
                   .map((binding) => binding.candidateId),
           ).context(
-            frozenContext.skills.filter((r) => !r.external).map((r) => r.id),
+            frozenContext.skills.map((r) => r.id),
             frozenContext.knowledge.map((r) => r.id),
             frozenContext.workflow?.id ?? null,
             frozenTask.projectId,

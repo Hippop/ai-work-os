@@ -7,8 +7,11 @@ export type Job = {
   outputDir: string;
   command: string;
   commandPrefix: string[];
+  env?: NodeJS.ProcessEnv;
+  cgroup?: import("./linux-cgroup.js").CgroupLimits;
   objective: string;
   criteria: string[];
+  flowInstructions?: string;
   testCommand: TestCommand;
   deadline: number;
   model?: string | null;

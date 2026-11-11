@@ -200,6 +200,7 @@ export class Supervisor {
         taskType: task.type,
         diagnosis: run.manifest.diagnosis as Job["diagnosis"],
         criteria: task.acceptanceCriteria,
+        flowInstructions: task.flowRequirements?.instructions ?? "",
         testCommand: project.testCommand!,
         deadline,
         model: run.manifest.model as Job["model"],

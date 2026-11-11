@@ -1,6 +1,38 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
+export const FlowOperationInput = z.enum([
+  "analyze", "design", "implement", "test", "review", "deliver",
+  "collect", "hypothesize", "verify", "conclude",
+]);
+export const FlowNodeInput = z.object({
+  key: z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/),
+  operation: FlowOperationInput,
+  title: z.string().trim().min(1).max(200),
+  dependsOn: z.array(z.string()).max(30).default([]),
+  instruction: z.string().trim().max(2000).optional(),
+});
+export const FlowStageInput = FlowNodeInput.pick({
+  operation: true,
+  title: true,
+  instruction: true,
+});
+const flowInstructions = z.string().trim().max(4000).default("");
+export const FlowRequirementsInput = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("standard"), instructions: flowInstructions }),
+  z.object({
+    mode: z.literal("compose"),
+    instructions: flowInstructions,
+    stages: z.array(FlowStageInput).min(1).max(30),
+  }),
+  z.object({
+    mode: z.literal("graph"),
+    instructions: flowInstructions,
+    nodes: z.array(FlowNodeInput).min(1).max(30),
+  }),
+]);
+export type FlowRequirements = z.infer<typeof FlowRequirementsInput>;
+
 export const TaskInput = z.object({
   title: z.string().trim().min(1).max(200),
   objective: z.string().trim().min(1).max(20000),
@@ -16,6 +48,7 @@ export const TaskInput = z.object({
   externalSkillIds: z.array(z.string().uuid()).max(20).default([]),
   knowledgeVersionIds: z.array(z.string().uuid()).max(30).default([]),
   workflowVersionId: z.string().uuid().nullable().default(null),
+  flowRequirements: FlowRequirementsInput.nullable().default(null),
   resourceFamilyIds: z
     .array(z.string().regex(/^[a-f0-9]{64}$/))
     .max(30)

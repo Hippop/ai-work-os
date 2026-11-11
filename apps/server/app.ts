@@ -1,15 +1,21 @@
+import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
+import { AssetService } from "../../packages/adaptive/assets.js";
+import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
+import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
+import { ExternalSkillService } from "../../packages/external-skills/index.js";
+import { McpRegistry } from "../../packages/adaptive/mcp.js";
+import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import express from "express";
 import { z, ZodError } from "zod";
-import { resolve, join } from "node:path";
+import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import { PlanningService } from "../../packages/planning/index.js";
 import { DiagnosisService } from "../../packages/diagnosis/index.js";
 import { OptimizationService } from "../../packages/optimization/index.js";
 import { RolloutService } from "../../packages/optimization/rollout.js";
-import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { probeCodex } from "../../packages/runtime/adapter.js";
 import {
   inspectRecovery,
@@ -21,6 +27,7 @@ import {
 } from "../../packages/resources/index.js";
 import {
   DomainError,
+  FlowRequirementsInput,
   type Run,
   type Task,
   digest,
@@ -31,10 +38,11 @@ export function createApp(
   token: string,
   service = new WorkService(store),
   dataDir?: string,
+  adaptive = new AdaptiveEngine(store),
+  adaptiveRuntime?: AdaptiveRuntime,
 ) {
   const app = express();
   const resources = new ResourceService(store);
-  const externalSkills = new ExternalSkillService(store);
   const planning = new PlanningService(store),
     diagnosis = new DiagnosisService(store);
   const optimization = new OptimizationService(store, dataDir, service.runtime);
@@ -240,14 +248,6 @@ export function createApp(
   app.post("/api/v1/tasks/:id/diagnosis/reports", (req, res) =>
     res.status(201).json(diagnosis.report(req.params.id, req.body)),
   );
-  app.get("/api/v1/skill-sources", (_req, res) => res.json(externalSkills.sources()));
-  app.get("/api/v1/external-skills", (_req, res) => res.json(externalSkills.skills()));
-  app.post("/api/v1/skill-sources", (req, res) =>
-    res.status(201).json(externalSkills.register(req.body)),
-  );
-  app.post("/api/v1/skill-sources/:id/scan", (req, res) =>
-    res.json(externalSkills.scan(req.params.id)),
-  );
   app.get("/api/v1/resources", (_req, res) =>
     res.json(
       store
@@ -297,6 +297,22 @@ export function createApp(
         body.reason,
       ),
     );
+  });
+  app.post("/api/v1/flows/preview", (req, res) => {
+    const input = z.object({
+      type: z.enum(["development", "diagnosis"]),
+      projectId: z.string().uuid().nullable().default(null),
+      workflowVersionId: z.string().uuid().nullable().default(null),
+      resourceFamilyIds: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(30).default([]),
+      flowRequirements: FlowRequirementsInput.nullable().default(null),
+    }).parse(req.body);
+    if (input.projectId && !store.get("project", input.projectId))
+      throw new DomainError("not_found", "项目不存在", 404);
+    const context = resources.context(
+      [], [], input.workflowVersionId, input.projectId,
+      input.type, input.resourceFamilyIds, undefined, input.flowRequirements,
+    );
+    res.json({ plan: context.plan, workflow: context.workflow });
   });
   app.post("/api/v1/tasks", (req, res) =>
     res.status(201).json(service.createTask(req.body)),
@@ -440,6 +456,167 @@ export function createApp(
       ],
     });
   });
+  // Adaptive Work OS V2: versioned capability/knowledge assets and event-driven runs.
+  const adaptiveAssets = new AssetService(store);
+  const skillSources = new ExternalSkillService(store);
+  app.get("/api/v2/capabilities", (_req, res) => res.json(adaptiveAssets.listCapabilities()));
+  app.post("/api/v2/capabilities", (req, res) =>
+    res.status(201).json(adaptiveAssets.createCapability(req.body)));
+  app.post("/api/v2/capabilities/:id/candidate", (req, res) =>
+    res.json(adaptiveAssets.updateCandidate(req.params.id, req.body)));
+  app.post("/api/v2/capabilities/:id/sample-run", async (req, res) => {
+    const b = z.object({ projectId: z.string().uuid(), sampleInput: z.unknown() }).parse(req.body);
+    if (!adaptiveRuntime) throw new DomainError("runtime_unavailable", "本机模型运行器不可用", 503);
+    res.json(await adaptiveRuntime.verifyCandidate(req.params.id, b.projectId, b.sampleInput));
+  });
+  app.get("/api/v2/capabilities/:id/samples", (req, res) =>
+    res.json(store.list<{ capabilityId: string }>("adaptive_capability_sample")
+      .filter((item) => item.capabilityId === req.params.id)));
+  app.post("/api/v2/capabilities/:id/validate", (req, res) => {
+    const b = z.object({
+      evidence: z.string(),
+      sample: z.object({ input: z.unknown(), output: z.unknown() }).optional(),
+    }).parse(req.body);
+    res.json(adaptiveAssets.validateCapability(req.params.id, b.evidence, b.sample));
+  });
+  app.post("/api/v2/capabilities/:id/publish", (req, res) => res.json(adaptiveAssets.publishCapability(req.params.id)));
+  app.post("/api/v2/capabilities/:id/revoke", (req, res) => {
+    adaptiveAssets.revokeCapability(req.params.id); res.json({ status: "revoked" });
+  });
+  const mcpRegistry = new McpRegistry(store);
+  app.get("/api/v2/mcp-servers", (_req, res) => res.json(mcpRegistry.list()));
+  app.post("/api/v2/mcp-servers", (req, res) =>
+    res.status(201).json(mcpRegistry.register(req.body)));
+  app.post("/api/v2/mcp-servers/:id/publish", (req, res) =>
+    res.json(mcpRegistry.publish(req.params.id)));
+  app.post("/api/v2/mcp-servers/:id/revoke", (req, res) =>
+    res.json(mcpRegistry.revoke(req.params.id)));
+  app.get("/api/v2/profiles", (_req, res) => res.json(store.list("adaptive_profile")));
+  app.post("/api/v2/profiles", (req, res) => res.status(201).json(adaptiveAssets.createProfile(req.body)));
+  app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
+  app.get("/api/v2/knowledge", (_req, res) => res.json(adaptiveAssets.listKnowledge()));
+  app.post("/api/v2/knowledge", (req, res) => res.status(201).json(adaptiveAssets.createKnowledge(req.body)));
+  app.post("/api/v2/knowledge/:id/draft", (req, res) =>
+    res.json(adaptiveAssets.updateKnowledgeDraft(req.params.id, req.body)));
+  app.post("/api/v2/knowledge/:id/revise", (req, res) =>
+    res.status(201).json(adaptiveAssets.reviseKnowledge(req.params.id, req.body)));
+  app.post("/api/v2/knowledge/:id/publish", (req, res) => res.json(adaptiveAssets.publishKnowledge(req.params.id)));
+  app.post("/api/v2/knowledge/:id/revoke", (req, res) => {
+    adaptiveAssets.revokeKnowledge(req.params.id); res.json({ status: "revoked" });
+  });
+  app.get("/api/v2/knowledge-bindings", (_req, res) => res.json(store.list("adaptive_knowledge_binding")));
+  app.post("/api/v2/knowledge-bindings/:id/revoke", (req, res) =>
+    res.json(adaptiveAssets.revokeKnowledgeBinding(req.params.id)));
+  app.post("/api/v2/knowledge-bindings", (req, res) =>
+    res.status(201).json(adaptiveAssets.bindKnowledge(req.body)));
+  app.post("/api/v2/knowledge/search", (req, res) => {
+    const b = z.object({
+      query: z.string().max(2000), projectId: z.string().uuid().nullable().default(null),
+      taskId: z.string().uuid().nullable().default(null), capabilityName: z.string().min(1).max(120),
+    }).parse(req.body);
+    res.json(adaptiveAssets.retrieveKnowledge(b.query, b.projectId, b.taskId, b.capabilityName));
+  });
+  app.get("/api/v1/skill-sources", (_req, res) => res.json(skillSources.sources()));
+  app.post("/api/v1/skill-sources", (req, res) => res.status(201).json(skillSources.register(req.body)));
+  app.post("/api/v1/skill-sources/:id/scan", (req, res) => res.json(skillSources.scan(req.params.id)));
+  app.get("/api/v1/external-skills", (_req, res) => res.json(skillSources.skills()));
+  app.get("/api/v2/skill-sources", (_req, res) => res.json(skillSources.sources()));
+  app.post("/api/v2/skill-sources", (req, res) => res.status(201).json(skillSources.register(req.body)));
+  app.post("/api/v2/skill-sources/:id/scan", (req, res) => res.json(skillSources.scan(req.params.id)));
+  app.get("/api/v2/external-skills", (_req, res) => res.json(skillSources.skills()));
+  app.post("/api/v2/skill-candidates", async (req, res) => {
+    const b = z.object({
+      skillId: z.string().uuid(), projectId: z.string().uuid().optional(),
+      profileRef: z.string().optional(), ai: z.boolean().default(false),
+    }).parse(req.body);
+    if (b.ai) {
+      if (!adaptiveRuntime || !b.projectId) throw new DomainError("model_required", "AI 分析需要可用模型和项目", 422);
+      res.status(201).json(await adaptiveRuntime.createSkillCandidate(b.skillId, b.projectId, b.profileRef));
+    } else res.status(201).json(adaptiveAssets.draftFromSkill(b.skillId));
+  });
+  app.post("/api/v2/workflows/validate", (req, res) => {
+    const b = z.object({ projectId: z.string().uuid().nullable().default(null),
+      taskId: z.string().uuid().optional(), plan: z.unknown() }).parse(req.body);
+    res.json({ plan: adaptive.validate(b.plan, b.projectId, b.taskId) });
+  });
+  app.post("/api/v2/tasks/:id/standard-plan", (req, res) => {
+    const task = service.required<Task>("task", req.params.id);
+    const plan = standardAdaptivePlan(task);
+    res.json({ plan: adaptive.validate(plan, task.projectId, task.id), source: "deterministic-template" });
+  });
+  app.post("/api/v2/tasks/:id/compose", async (req, res) =>
+    res.json({ plan: await adaptive.compose(req.params.id) }));
+  app.get("/api/v2/analytics", (req, res) => {
+    const params = z.object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+      limit: z.coerce.number().int().min(1).max(5000).default(2000),
+    }).parse(req.query);
+    res.json(new AdaptiveObservability(store).report(params));
+  });
+  app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
+  app.post("/api/v2/adaptive-runs", (req, res) => {
+    const b = z.object({ taskId: z.string().uuid(), plan: z.unknown() }).parse(req.body);
+    res.status(201).json(adaptive.createRun(b.taskId, b.plan));
+  });
+  app.post("/api/v2/adaptive-runs/:id/extract-knowledge", async (req, res) => {
+    const b = z.object({
+      name: z.string().min(1).max(120),
+      version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    }).parse(req.body);
+    if (!adaptiveRuntime) throw new DomainError("runtime_unavailable", "模型运行器不可用", 503);
+    res.status(201).json(await adaptiveRuntime.extractRunKnowledge(req.params.id, b.name, b.version));
+  });
+  app.get("/api/v2/adaptive-runs/:id/artifacts/:nodeId/:name", (req, res) => {
+    if (!dataDir) throw new DomainError("artifact_unavailable", "工件目录未配置", 404);
+    const run = adaptive.get(req.params.id);
+    const result = run.results[req.params.nodeId];
+    const name = req.params.name;
+    if (!result || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}$/.test(name))
+      throw new DomainError("artifact_not_found", "工件不存在", 404);
+    const selected = result.artifactRefs.find((entry) => basename(entry) === name);
+    if (!selected) throw new DomainError("artifact_not_found", "工件不存在", 404);
+    const root = realpathSync(join(dataDir, "adaptive"));
+    const canonical = realpathSync(selected);
+    const rel = relative(root, canonical);
+    if (rel === ".." || rel.startsWith(".." + pathSep) || isAbsolute(rel))
+      throw new DomainError("artifact_forbidden", "工件路径不在授权目录中", 403);
+    const info = statSync(canonical);
+    if (!info.isFile() || info.size > 16 * 1024 * 1024)
+      throw new DomainError("artifact_invalid", "不支持此工件类型或大小", 422);
+    res.attachment(name);
+    res.send(readFileSync(canonical));
+  });
+  app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
+  app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
+  app.get("/api/v2/adaptive-runs/:id/side-effects", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_side_effect").filter((item) => item.runId === req.params.id)));
+  app.get("/api/v2/adaptive-runs/:id/invocations", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_invocation").filter((i) => i.runId === req.params.id)));
+  app.get("/api/v2/adaptive-runs/:id/plan-revisions", (req, res) =>
+    res.json(store.list<{ runId: string }>("adaptive_plan_revision").filter((i) => i.runId === req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/manual/:nodeId/complete", (req, res) => {
+    const b = z.object({ output: z.unknown() }).parse(req.body);
+    res.json(adaptive.completeManual(req.params.id, req.params.nodeId, b.output));
+  });
+  app.post("/api/v2/adaptive-runs/:id/reconcile/:nodeId", (req, res) => {
+    const b = z.object({ stoppedConfirmed: z.boolean(), note: z.string() }).parse(req.body);
+    res.json(adaptive.reconcileUncertain(req.params.id, req.params.nodeId, b.stoppedConfirmed, b.note));
+  });
+  app.post("/api/v2/adaptive-runs/:id/accept", (req, res) => {
+    const b = z.object({ accepted: z.boolean(), reason: z.string().default("") }).parse(req.body);
+    res.json(adaptive.accept(req.params.id, b.accepted, b.reason));
+  });
+  app.post("/api/v2/adaptive-runs/:id/cancel", (req, res) => res.json(adaptive.cancel(req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/retry", (req, res) => {
+    const b = z.object({ nodeId: z.string().min(1) }).parse(req.body);
+    res.json(adaptive.retry(req.params.id, b.nodeId));
+  });
+  app.post("/api/v2/adaptive-runs/:id/observations/:checkpointId/replan", async (req, res) =>
+    res.json(await adaptive.resumeReplan(req.params.id, req.params.checkpointId)));
+  app.post("/api/v2/adaptive-runs/:id/observations/:checkpointId/decision", (req, res) =>
+    res.json(adaptive.resolveWaiting(req.params.id, req.params.checkpointId, req.body)));
+  app.get("/api/v2/asset-events/:kind/:id", (req, res) =>
+    res.json(store.events("asset:" + req.params.kind + ":" + req.params.id)));
   app.use("/api", (_req, res) =>
     res.status(404).json({ code: "not_found", message: "接口不存在" }),
   );
