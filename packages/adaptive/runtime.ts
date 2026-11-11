@@ -132,9 +132,10 @@ export class AdaptiveRuntime {
           this.store.put("adaptive_workspace", { id: call.run.id, path: workspace, baseCommit: base });
         }
       }
-      if (profile.executor === "program") {
+      if (profile.executor === "program" || profile.executor === "project-test") {
         const before = workspaceDigest(workspace);
-        const r = await execute(profile.program!.executable, profile.program!.args, workspace,
+        const program = profile.executor === "project-test" ? project.testCommand! : profile.program!;
+        const r = await execute(program.executable, program.args, workspace,
           Date.now() + profile.timeoutSeconds * 1000, this.child);
         if (r.code !== 0) throw new Error("Program returned " + r.code + ": " + r.stderr.slice(0, 800));
         if (workspaceDigest(workspace) !== before)
