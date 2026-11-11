@@ -99,6 +99,7 @@ function App() {
         current: boolean;
       }[]
     >([]);
+  const [externalSkills, setExternalSkills] = useState<{ id: string; name: string; status: string }[]>([]);
   const [flowMode, setFlowMode] = useState<"standard" | "compose" | "graph">("standard");
   const [flowTaskType, setFlowTaskType] = useState("manual");
   const [flowPreview, setFlowPreview] = useState<
@@ -134,18 +135,20 @@ function App() {
     return result;
   }
   async function refresh() {
-    const [t, p, r, d, versions] = await Promise.all([
+    const [t, p, r, d, versions, importedSkills] = await Promise.all([
       api<Task[]>("/tasks"),
       api<Project[]>("/projects"),
       api<Run[]>("/runs"),
       api<Delivery[]>("/deliveries"),
       api<typeof resources>("/resources"),
+      api<typeof externalSkills>("/v2/external-skills"),
     ]);
     setTasks(t);
     setProjects(p);
     setRuns(r);
     setDeliveries(d);
     setResources(versions);
+    setExternalSkills(importedSkills);
   }
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -210,6 +213,7 @@ function App() {
         priority: form.get("priority"),
         flowRequirements: buildFlowRequest(form),
         projectId: form.get("projectId") || null,
+        externalSkillIds: form.getAll("externalSkillIds").map(String),
         skillVersionIds: form
           .getAll("skillVersionIds")
           .filter((v) => !String(v).startsWith("active:")),
@@ -1004,6 +1008,13 @@ function App() {
                   )}
                 </div>
               )}
+              <label>外部 Skill（引用目录中的 SKILL.md，不复制）
+                <select name="externalSkillIds" multiple>
+                  {externalSkills.filter((skill) => skill.status === "available").map((skill) => (
+                    <option key={skill.id} value={skill.id}>{skill.name}</option>
+                  ))}
+                </select>
+              </label>
               {(["skill", "knowledge"] as const).map((kind) => (
                 <label key={kind}>
                   {kind === "skill" ? "Skill版本" : "知识版本"}（可多选）
