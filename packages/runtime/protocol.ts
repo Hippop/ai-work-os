@@ -9,6 +9,7 @@ export type Job = {
   commandPrefix: string[];
   objective: string;
   criteria: string[];
+  flowInstructions?: string;
   testCommand: TestCommand;
   deadline: number;
   model?: string | null;
