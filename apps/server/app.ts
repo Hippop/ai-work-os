@@ -484,6 +484,10 @@ export function createApp(
     }).parse(req.body);
     res.json(adaptiveAssets.retrieveKnowledge(b.query, b.projectId, b.taskId, b.capabilityName));
   });
+  app.get("/api/v1/skill-sources", (_req, res) => res.json(skillSources.sources()));
+  app.post("/api/v1/skill-sources", (req, res) => res.status(201).json(skillSources.register(req.body)));
+  app.post("/api/v1/skill-sources/:id/scan", (req, res) => res.json(skillSources.scan(req.params.id)));
+  app.get("/api/v1/external-skills", (_req, res) => res.json(skillSources.skills()));
   app.get("/api/v2/skill-sources", (_req, res) => res.json(skillSources.sources()));
   app.post("/api/v2/skill-sources", (req, res) => res.status(201).json(skillSources.register(req.body)));
   app.post("/api/v2/skill-sources/:id/scan", (req, res) => res.json(skillSources.scan(req.params.id)));
