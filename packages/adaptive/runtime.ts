@@ -11,6 +11,7 @@ import { createWorkspace, exportChanges, git, workspaceDigest } from "../workspa
 import { PlanInput, DecisionInput, type CapabilityCall, type Executor, type Planner, type AdaptiveRun, type EvalCall } from "./engine.js";
 import { AssetService, CapabilityInput, type Capability } from "./assets.js";
 import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
+import { summarizeCodexEvents } from "./telemetry.js";
 
 function strict(schema: any): any {
   if (Array.isArray(schema)) return schema.map(strict);
@@ -243,19 +244,16 @@ export class AdaptiveRuntime {
         writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
         let modelUsage: { inputTokens?: number; outputTokens?: number } | undefined;
         try {
-          const lines = readFileSync(join(folder, sanitizeName(call.node.id) + ".events.jsonl"), "utf8").split("\\n");
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            const event = JSON.parse(line);
-            const usage = event?.usage ?? event?.item?.usage;
-            if (event?.type === "turn.completed" && usage) {
-              modelUsage = {
-                inputTokens: usage.input_tokens ?? usage.inputTokens,
-                outputTokens: usage.output_tokens ?? usage.outputTokens,
-              };
-            }
-          }
-        } catch { /* old Codex event formats may omit usage */ }
+          const eventsFile = join(folder, sanitizeName(call.node.id) + ".events.jsonl");
+          const report = summarizeCodexEvents(readFileSync(eventsFile, "utf8"));
+          modelUsage = report.usage;
+          for (const item of report.tools) this.store.event(call.run.id,
+            "adaptive.tool.observed", {
+              nodeId:call.node.id, invocationId:call.invocationId,
+              kind:item.kind, name:item.name,
+              inputDigest:item.inputDigest, outputDigest:item.outputDigest,
+            }, "agent");
+        } catch { /* old Codex event formats may omit optional telemetry */ }
         return { output, artifacts: [join(folder, "result.json")], modelUsage };
       } finally { isolated.dispose(); }
     };
