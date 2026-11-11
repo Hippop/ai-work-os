@@ -44,7 +44,7 @@ export type AdaptiveRun = {
   nodeStates: Record<string, NState>; observationStates: Record<string, OState>;
   results: Record<string, { output: unknown; artifactRefs: string[]; invocationId: string; digest: string }>;
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
-  createdAt: string; updatedAt: string;
+  createdAt: string; updatedAt: string; budgetUsd?: number | null;
 };
 export const DecisionInput = z.object({
   decision: z.enum(["CONTINUE", "REPLAN", "RETRY", "WAIT_INPUT", "WAIT_APPROVAL", "STOP"]),
@@ -225,7 +225,9 @@ export class AdaptiveEngine {
       throw error;
     }
   }
-  createRun(taskId: string, planInput: unknown): AdaptiveRun {
+  createRun(taskId: string, planInput: unknown, budgetUsd: number | null = null): AdaptiveRun {
+    if (budgetUsd !== null && (!Number.isFinite(budgetUsd) || budgetUsd <= 0 || budgetUsd > 1000))
+      throw new DomainError("budget_invalid","运行预算必须在 0 到 1000 美元之间",422);
     const task = this.store.get<Task>("task", taskId);
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
     const plan = this.validate(planInput, task.projectId, task.id);
@@ -251,17 +253,19 @@ export class AdaptiveEngine {
           if (!source || source.digest !== cap.sourceDigest)
             throw new DomainError("source_skill_changed", "能力原始 Skill 已变化，需要验证新版本", 422);
         }
+        if (budgetUsd !== null && profile.executor === "agent" && !profile.billing)
+          throw new DomainError("billing_rates_missing","费用预算模式要求所有 Agent Profile 配置单价和预留 token",422);
         snapshots[node.id] = { capability: cap, profileRef, profile, skillInstructions };
       }
       const run: AdaptiveRun = {
         id, taskId, status: "queued", planRevision: 1, plan, snapshots,
         nodeStates: Object.fromEntries(plan.nodes.map((n) => [n.id, "pending"])),
         observationStates: {}, results: {}, failures: {}, decisions: {},
-        revisionCount: 1, createdAt: now, updatedAt: now,
+        revisionCount: 1, createdAt: now, updatedAt: now, budgetUsd,
       };
       this.store.put("adaptive_run", run);
       this.store.put("adaptive_plan_revision", { id: id + ":1", runId: id, number: 1, plan, digest: digest(plan), reason: "initial" });
-      this.store.event(id, "adaptive.run.created", { taskId, planDigest: digest(plan) });
+      this.store.event(id, "adaptive.run.created", { taskId, planDigest: digest(plan), budgetUsd });
       this.store.put("task", { ...task, status: "in_progress", updatedAt: now });
       return run;
     });
