@@ -265,6 +265,49 @@ export class AdaptiveRuntime {
     });
     return { ...record, output };
   }
+  /** Propose a knowledge entry from real run evidence. Never auto-publish or promote to global scope. */
+  async extractRunKnowledge(runId: string, name: string, version: string) {
+    const run = this.store.get<AdaptiveRun>("adaptive_run", runId);
+    if (!run) throw new DomainError("run_missing", "运行不存在", 404);
+    if (!["done", "awaiting_acceptance"].includes(run.status))
+      throw new DomainError("run_not_reviewed", "只能从已交付运行提取知识候选", 422);
+    const task = this.store.get<Task>("task", run.taskId)!;
+    if (!task.projectId) throw new DomainError("project_required", "沉淀项目知识需要关联项目", 422);
+    const prompt = [
+      "Extract a concise evidence-based, reusable engineering knowledge draft from the supplied run.",
+      "Do not turn speculation into verified fact. Clearly label hypotheses and known limitations.",
+      "No secrets, personal credentials, or absolute local paths. Do not claim experiments that were not recorded.",
+      "Task:" + JSON.stringify({ objective: task.objective, criteria: task.acceptanceCriteria }),
+      "Plan:" + JSON.stringify(run.plan).slice(0, 12000),
+      "Results:" + JSON.stringify(run.results).slice(0, 25000),
+      "Failure/replan decisions:" + JSON.stringify(run.decisions).slice(0, 10000),
+      "Return exactly JSON with title (string), content (Markdown string), tags (string array).",
+    ].join("\n");
+    const schema = {
+      type: "object", additionalProperties: false,
+      required: ["title", "content", "tags"],
+      properties: {
+        title: { type: "string" }, content: { type: "string" },
+        tags: { type: "array", items: { type: "string" } },
+      },
+    };
+    const result = await this.json("knowledge-extract", task, prompt, schema,
+      (value) => z.object({
+        title: z.string().min(1).max(160),
+        content: z.string().min(1).max(200000),
+        tags: z.array(z.string().max(60)).max(30),
+      }).parse(value));
+    const assets = new AssetService(this.store);
+    const k = assets.createKnowledge({
+      name, version, title: result.title, content: result.content,
+      tags: result.tags, scope: "project", projectId: task.projectId,
+      source: "adaptive-run:" + runId,
+      evidenceRefs: Object.values(run.results).flatMap((value) => value.artifactRefs).slice(0, 50),
+    });
+    this.store.event(runId, "adaptive.knowledge.candidate_created",
+      { knowledgeRef: k.id, sourceRunId: runId, evidenceRefs: k.evidenceRefs });
+    return k;
+  }
   async createSkillCandidate(skillId: string, projectId: string, profileRef?: string): Promise<Capability> {
     const service = new AssetService(this.store), [skill] = new ExternalSkillService(this.store).snapshot([skillId]);
     const task: Task = {
