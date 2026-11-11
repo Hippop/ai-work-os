@@ -69,12 +69,30 @@ export class AdaptiveRuntime {
       "--output-schema", schemaFile, "-o", resultFile, prompt];
     const deadline = Date.now() + 5 * 60_000;
     const isolated = isolatedCodexHome(renderMcpConfig([]));
+    const auditId = "brain:" + task.id, startedAt = Date.now();
+    this.store.event(auditId, "adaptive.brain.started", {
+      kind, promptDigest: digest(prompt), model: this.model ?? null,
+    });
     try {
       const result = await execute(this.command(), args, workDir, deadline, this.child,
         { env: isolated.env, cgroup: this.containment() });
       if (result.code !== 0) throw new Error("Codex " + kind + " failed: " + result.stderr.slice(0, 800));
+      const telemetry = summarizeCodexEvents(result.stdout);
       const parsed = JSON.parse(readFileSync(resultFile, "utf8")) as unknown;
-      return parse(parsed);
+      const verified = parse(parsed);
+      this.store.event(auditId, "adaptive.brain.completed", {
+        kind, resultDigest: digest(verified), durationMs: Date.now()-startedAt,
+        modelUsage: telemetry.usage ?? null,
+        tools: telemetry.tools.map((item) => ({
+          kind:item.kind,name:item.name,inputDigest:item.inputDigest,outputDigest:item.outputDigest,
+        })),
+      });
+      return verified;
+    } catch (error) {
+      this.store.event(auditId, "adaptive.brain.failed", {
+        kind, durationMs: Date.now()-startedAt, errorCode:(error as Error).name,
+      });
+      throw error;
     } finally { isolated.dispose(); }
   }
   planner(): Planner {
