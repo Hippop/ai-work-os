@@ -59,7 +59,7 @@ export type Planner = {
   compose(task: Task, catalog: Capability[], knowledge: ReturnType<AssetService["retrieveKnowledge"]>, previous?: AdaptiveRun): Promise<Plan>;
   evaluate(context: EvalCall): Promise<Decision>;
 };
-export type Executor = (call: CapabilityCall) => Promise<{ output: unknown; artifacts?: string[] }>;
+export type Executor = (call: CapabilityCall) => Promise<{ output: unknown; artifacts?: string[]; businessStatus?: "accepted" | "rejected" | "unknown" }>;
 
 function byId<T extends { id: string }>(items: T[]) { return new Map(items.map((item) => [item.id, item])); }
 export class AdaptiveEngine {
@@ -334,6 +334,15 @@ export class AdaptiveEngine {
       if (!this.executor) throw new DomainError("executor_unavailable", "未配置能力执行器", 503);
       const response = await this.executor(prepared);
       checkSchema(prepared.capability.outputSchema, response.output);
+      if (response.businessStatus === "rejected")
+        throw new DomainError("business_rejected", "原子能力执行完成，但业务验收未通过", 422);
+      if (prepared.capability.tags.includes("review")) {
+        const report = response.output as { risks?: unknown };
+        if (!Array.isArray(report.risks))
+          throw new DomainError("review_invalid", "代码审查没有结构化风险输出", 422);
+        if (report.risks.length)
+          throw new DomainError("review_blocked", "代码审查发现未解决的风险，禁止交付", 422);
+      }
       this.store.transaction(() => {
         const run = this.get(id);
         if (run.nodeStates[nodeId] !== "running") return;
