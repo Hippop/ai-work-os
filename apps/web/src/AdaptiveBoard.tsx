@@ -283,7 +283,19 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
         {c.status === "candidate" && <button className="quiet" onClick={() => {
           const evidence = window.prompt("请填写真实的契约验证结果及依据（不是模型推断）");
           if (!evidence) return;
-          void act(async () => { await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/validate", { evidence }); await load(); });
+          let sample: {input: unknown; output: unknown} | undefined;
+          if (c.sourceSkillId) {
+            const i = window.prompt("Skill 能力必须提供测试输入 JSON", '{"objective":"Review code"}');
+            if (!i) return;
+            const o = window.prompt("Skill 能力必须提供实际输出 JSON", '{"summary":"Reviewed","evidence":[],"risks":[]}');
+            if (!o) return;
+            try { sample = { input: JSON.parse(i), output: JSON.parse(o) }; }
+            catch { window.alert("输入和输出必须是有效 JSON"); return; }
+          }
+          void act(async () => {
+            await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/validate", { evidence, sample });
+            await load();
+          });
         }}>标记验证通过</button>}
         {c.status === "validated" && <button className="quiet" onClick={() => void act(async () => {
           await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/publish", {}); await load();
