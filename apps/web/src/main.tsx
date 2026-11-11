@@ -37,6 +37,44 @@ type Delivery = {
   summary: string;
   createdAt: string;
 };
+const developmentStages = [
+  { operation: "analyze", title: "需求分析", instruction: "明确需求范围和验收要点" },
+  { operation: "design", title: "方案设计" },
+  { operation: "implement", title: "代码实现" },
+  { operation: "test", title: "运行测试" },
+  { operation: "review", title: "代码审查" },
+  { operation: "deliver", title: "成果交付" },
+];
+const diagnosisStages = [
+  { operation: "collect", title: "收集证据" },
+  { operation: "hypothesize", title: "形成假设" },
+  { operation: "verify", title: "验证与反证" },
+  { operation: "conclude", title: "形成结论" },
+  { operation: "deliver", title: "交付诊断报告" },
+];
+function buildFlowRequest(form: FormData) {
+  const mode = String(form.get("flowMode") || "standard");
+  const instructions = String(form.get("flowInstructions") || "").trim();
+  if (form.get("type") === "manual") return null;
+  if (mode === "standard") return instructions ? { mode, instructions } : null;
+  const source = String(form.get("flowDefinition") || "").trim();
+  if (!source) throw new Error("请填写流程步骤 JSON");
+  const stages = JSON.parse(source);
+  return mode === "compose"
+    ? { mode, instructions, stages }
+    : { mode: "graph", instructions, nodes: stages };
+}
+function sampleFlow(mode: "standard" | "compose" | "graph", taskType: string) {
+  const stages = taskType === "diagnosis" ? diagnosisStages : developmentStages;
+  if (mode !== "graph") return JSON.stringify(stages, null, 2);
+  return JSON.stringify(stages.map(({ operation, title, instruction }, i) => ({
+    key: operation + "_1",
+    operation,
+    title,
+    ...(instruction ? { instruction } : {}),
+    dependsOn: i ? [stages[i - 1].operation + "_1"] : [],
+  })), null, 2);
+}
 function App() {
   const [token, setToken] = useState(
     sessionStorage.getItem("ai-work-os-token") ?? "",
@@ -59,6 +97,11 @@ function App() {
         current: boolean;
       }[]
     >([]);
+  const [flowMode, setFlowMode] = useState<"standard" | "compose" | "graph">("standard");
+  const [flowTaskType, setFlowTaskType] = useState("manual");
+  const [flowPreview, setFlowPreview] = useState<
+    { key: string; operation: string; title: string; dependsOn: string[] }[]
+  >([]);
   const [selected, setSelected] = useState<string>(),
     [events, setEvents] = useState<Event[]>([]),
     [busy, setBusy] = useState(false),
@@ -68,6 +111,7 @@ function App() {
     preparationDigest: string;
     ready: boolean;
     checks: { label: string; passed: boolean; detail: string }[];
+    plan: { key: string; operation: string; title: string; dependsOn: string[] }[];
   }>();
   async function api<T = any>(
     path: string,
@@ -138,13 +182,16 @@ function App() {
     pending = tasks.filter((t) => t.status === "awaiting_acceptance").length;
   async function prepare(task: Task) {
     await act(async () => {
+      const result = await api<{
+        preparationDigest: string;
+        ready: boolean;
+        checks: { label: string; passed: boolean; detail: string }[];
+        manifest: { context: { plan: { key: string; operation: string; title: string; dependsOn: string[] }[] } };
+      }>(`/tasks/${task.id}/prepare`, {});
       setPrepared({
-        ...(await api<{
-          preparationDigest: string;
-          ready: boolean;
-          checks: { label: string; passed: boolean; detail: string }[];
-        }>(`/tasks/${task.id}/prepare`, {})),
+        ...result,
         taskId: task.id,
+        plan: result.manifest.context.plan,
       });
     });
   }
@@ -157,6 +204,7 @@ function App() {
         objective: form.get("objective"),
         type: form.get("type"),
         priority: form.get("priority"),
+        flowRequirements: buildFlowRequest(form),
         projectId: form.get("projectId") || null,
         skillVersionIds: form
           .getAll("skillVersionIds")
@@ -394,6 +442,12 @@ function App() {
           {prepared && (
             <div className="panel preparation">
               <h2>执行准备</h2>
+              <details>
+                <summary>本次任务组装流程（{prepared.plan.length} 步）</summary>
+                <ol>{prepared.plan.map((node) => (
+                  <li key={node.key}>{node.title}（{node.operation}） · 依赖：{node.dependsOn.join(", ") || "无"}</li>
+                ))}</ol>
+              </details>
               {prepared.checks.map((c) => (
                 <p key={c.label}>
                   <span className={c.passed ? "pass" : "warn"}>
@@ -832,7 +886,7 @@ function App() {
               <div className="form-row">
                 <label>
                   执行方式
-                  <select name="type" defaultValue="manual">
+                  <select name="type" value={flowTaskType} onChange={(event) => { setFlowTaskType(event.target.value); setFlowPreview([]); }}>
                     <option value="manual">人工执行</option>
                     <option value="development">Codex 需求开发</option>
                     <option value="diagnosis">Codex 只读故障诊断</option>
@@ -888,6 +942,62 @@ function App() {
                     ))}
                 </select>
               </label>
+              {flowTaskType !== "manual" && (
+                <div className="panel">
+                  <h3>本任务的流程组装需求</h3>
+                  <p>可沿用标准/已发布模板、按步骤顺序组装，或提交完整 DAG。指定的流程只影响本任务，不会覆盖公共模板。</p>
+                  <label>组装方式
+                    <select name="flowMode" value={flowMode} onChange={(event) => {
+                      setFlowMode(event.target.value as typeof flowMode);
+                      setFlowPreview([]);
+                    }}>
+                      <option value="standard">沿用选定模板</option>
+                      <option value="compose">按步骤需求顺序组装</option>
+                      <option value="graph">自定义依赖图（高级）</option>
+                    </select>
+                  </label>
+                  <label>流程整体要求（会传递给执行 Agent）
+                    <textarea name="flowInstructions"
+                      placeholder="例如：重点关注向后兼容性；每步保留决策依据"
+                      maxLength={4000} rows={3} />
+                  </label>
+                  {flowMode !== "standard" && (
+                    <label>步骤清单（JSON 数组）
+                      <textarea
+                        key={flowTaskType + ":" + flowMode}
+                        name="flowDefinition"
+                        defaultValue={sampleFlow(flowMode, flowTaskType)}
+                        rows={12}
+                      />
+                    </label>
+                  )}
+                  {flowMode === "compose" && <p>每个步骤包含 operation、title 和可选 instruction。系统按填写顺序串接，并自动生成依赖。</p>}
+                  {flowMode === "graph" && <p>每个节点包含 key、operation、title、dependsOn 和可选 instruction。系统执行环依赖校验并采用拓扑顺序串行执行。</p>}
+                  <button type="button" className="quiet" onClick={(event) => {
+                    const form = event.currentTarget.form;
+                    if (!form) return;
+                    const data = new FormData(form);
+                    void act(async () => {
+                      const version = String(data.get("workflowVersionId") ?? "");
+                      const result = await api<{ plan: typeof flowPreview }>("/flows/preview", {
+                        type: data.get("type"),
+                        projectId: data.get("projectId") || null,
+                        workflowVersionId: version.startsWith("active:") ? null : version || null,
+                        resourceFamilyIds: version.startsWith("active:") ? [version.slice(7)] : [],
+                        flowRequirements: buildFlowRequest(data),
+                      });
+                      setFlowPreview(result.plan);
+                    });
+                  }}>预览并校验流程</button>
+                  {flowPreview.length > 0 && (
+                    <div><p>预计执行 {flowPreview.length} 个步骤（当前 Worker 为顺序执行）：</p>
+                      <ol>{flowPreview.map((node) => (
+                        <li key={node.key}>{node.title}（{node.operation}） · 依赖 {node.dependsOn.join(", ") || "无"}</li>
+                      ))}</ol>
+                    </div>
+                  )}
+                </div>
+              )}
               {(["skill", "knowledge"] as const).map((kind) => (
                 <label key={kind}>
                   {kind === "skill" ? "Skill版本" : "知识版本"}（可多选）
