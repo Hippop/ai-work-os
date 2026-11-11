@@ -606,6 +606,9 @@ export class AdaptiveEngine {
   retry(id: string, nodeId: string) {
     return this.store.transaction(() => {
       const run = this.get(id);
+      if (run.status === "reconciling" ||
+          Object.values(run.nodeStates).includes("uncertain"))
+        throw new DomainError("recovery_required", "仍有未核对的能力副作用", 409);
       if (!["failed", "waiting"].includes(run.nodeStates[nodeId])) throw new DomainError("retry_invalid", "节点当前无法重试", 422);
       if (Object.values(run.nodeStates).includes("running")) throw new DomainError("active_invocation", "仍有正在执行的能力");
       const attempts = this.store.list<{runId:string;nodeId:string}>("adaptive_invocation").filter((i)=>i.runId===id && i.nodeId===nodeId).length;
@@ -623,7 +626,13 @@ export class AdaptiveEngine {
     if (!["CONTINUE", "STOP"].includes(decision.decision)) throw new DomainError("manual_decision", "人工恢复只能继续或停止", 422);
     return this.store.transaction(() => {
       const run = this.get(id);
-      if (run.status !== "waiting" || !run.observationStates[checkpointId]) throw new DomainError("not_waiting", "观察点未处于等待态");
+      const currentDecision = run.decisions[checkpointId]?.decision;
+      const canResolve = run.status === "waiting" &&
+        (run.observationStates[checkpointId] === "waiting" ||
+          (run.observationStates[checkpointId] === "completed" &&
+           ["WAIT_INPUT", "WAIT_APPROVAL"].includes(currentDecision ?? "")));
+      if (!canResolve)
+        throw new DomainError("not_waiting", "观察点并非等待人工审批；REPLAN 必须完成安全重编排", 422);
       run.decisions[checkpointId] = decision; run.observationStates[checkpointId] = "completed";
       run.status = decision.decision === "STOP" ? "failed" : "running";
       this.save(run); this.store.event(id, "adaptive.observation.manually_resolved", { checkpointId, decision }, "user");
@@ -664,12 +673,15 @@ export class AdaptiveEngine {
       const cap = run.snapshots[nodeId]?.capability;
       if (!cap) throw new DomainError("not_found", "能力快照不存在", 404);
       // Never automatically replay a write after a crash: put entire run into failed state for explicit new task/revision.
-      if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write") {
-        run.nodeStates[nodeId] = "failed";
-        run.status = "failed";
+      run.nodeStates[nodeId] = "failed";
+      const otherUncertain = Object.values(run.nodeStates).includes("uncertain");
+      if (otherUncertain) {
+        run.status = "reconciling";
       } else {
-        run.nodeStates[nodeId] = "failed";
-        run.status = "waiting";
+        const writesHaveFailed = Object.entries(run.nodeStates).some(([key, state]) =>
+          state === "failed" && ["workspace-write", "external-write"]
+            .includes(run.snapshots[key]?.capability.sideEffect ?? ""));
+        run.status = writesHaveFailed ? "failed" : "waiting";
       }
       this.save(run);
       for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
