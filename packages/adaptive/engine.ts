@@ -170,7 +170,37 @@ export class AdaptiveEngine {
     }
     if (taskId) {
       const task = this.store.get<Task>("task", taskId);
-      if (!task || task.projectId !== projectId) throw new DomainError("task_scope", "任务与项目不匹配", 422);
+      if (!task || task.projectId !== projectId)
+        throw new DomainError("task_scope", "任务与项目不匹配", 422);
+      // Explicit task requirements are constraints, not merely suggestions in the planner prompt.
+      const requirements = task.flowRequirements;
+      if (requirements?.mode === "compose") {
+        let previous: string | undefined;
+        const consumed = new Set<string>();
+        for (const stage of requirements.stages) {
+          const match = sorted.find((node) =>
+            !consumed.has(node.id) &&
+            (capabilities.get(node.id)?.name === "core." + stage.operation ||
+             capabilities.get(node.id)?.tags.includes(stage.operation)) &&
+            (!previous || precedes(previous, node.id))
+          );
+          if (!match)
+            throw new DomainError("task_flow_mismatch",
+              "编排未保留用户指定的阶段及顺序：" + stage.operation, 422);
+          consumed.add(match.id); previous = match.id;
+        }
+      }
+      if (requirements?.mode === "graph") {
+        for (const requested of requirements.nodes) {
+          const actual = by.get(requested.key);
+          if (!actual ||
+              !(capabilities.get(actual.id)?.name === "core." + requested.operation ||
+                capabilities.get(actual.id)?.tags.includes(requested.operation)) ||
+              requested.dependsOn.some((dep) => !actual.dependsOn.includes(dep)))
+            throw new DomainError("task_flow_mismatch",
+              "编排未保留用户指定的图节点或直接依赖：" + requested.key, 422);
+        }
+      }
     }
     return { ...plan, nodes: sorted };
   }
