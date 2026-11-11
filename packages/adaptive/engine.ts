@@ -232,6 +232,9 @@ export class AdaptiveEngine {
     const created = this.store.transaction(() => {
       if (this.store.list<AdaptiveRun>("adaptive_run").some((r) => r.taskId === task.id && !["done", "failed", "cancelled"].includes(r.status)))
         throw new DomainError("active_run", "任务已有活跃的自适应运行");
+      if (this.store.list<{taskId:string;status:string}>("run").some((r) =>
+        r.taskId === task.id && !["succeeded","failed","cancelled"].includes(r.status)))
+        throw new DomainError("active_run", "任务已有活跃的旧版运行，不能同时启动自适应路径", 409);
       const id = randomUUID(), now = new Date().toISOString();
       const snapshots: AdaptiveRun["snapshots"] = {};
       for (const node of plan.nodes) {
