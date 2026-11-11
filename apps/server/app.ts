@@ -7,6 +7,7 @@ import { McpRegistry } from "../../packages/adaptive/mcp.js";
 import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
 import { BudgetService } from "../../packages/adaptive/budget.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
+import { AdaptiveAuditService } from "../../packages/adaptive/audit.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
@@ -572,6 +573,8 @@ export function createApp(
     }).parse(req.query);
     res.json(new AdaptiveObservability(store).report(params));
   });
+  app.get("/api/v2/adaptive-runs/:id/audit", (req, res) =>
+    res.json(new AdaptiveAuditService(store).exportRun(req.params.id)));
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
   app.post("/api/v2/adaptive-runs", (req, res) => {
     const b = z.object({
