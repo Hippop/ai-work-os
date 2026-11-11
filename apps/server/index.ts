@@ -12,6 +12,7 @@ import { OptimizationService } from "../../packages/optimization/index.js";
 import { acquireController } from "../../packages/runtime/recovery.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
+import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
 
 const dataDir =
   process.env.AI_WORK_OS_DATA_DIR ??
@@ -43,6 +44,7 @@ bootstrapAdaptiveAssets(store);
 const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
 const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
 adaptive.recover();
+new McpWriteService(store).recover();
 let adaptiveBusy = false, adaptivePending = false;
 function driveAdaptive() {
   if (adaptiveBusy) { adaptivePending = true; return; }
