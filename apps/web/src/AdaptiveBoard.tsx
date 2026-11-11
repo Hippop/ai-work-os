@@ -193,6 +193,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         projectId: f.get("projectId") || null,
         mcpGrants: JSON.parse(String(f.get("mcpGrants") || "[]")),
         workspaceMode: f.get("workspaceMode"),
+        workspaceSubdir: f.get("workspaceSubdir") || ".",
         skillIds: f.getAll("skillIds"),
         program: f.get("executor") === "program" ? {
           executable: f.get("executable"), args: JSON.parse(String(f.get("args") || "[]")),
@@ -216,6 +217,9 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           </label>
         </div>
         {profileExecutor === "agent" && <label>模型（可留空使用默认）<input name="model" /></label>}
+        <label>工作目录（相对项目/隔离 Worktree 的目录，不允许跨出根目录）
+          <input name="workspaceSubdir" defaultValue="." placeholder="src/backend" required />
+        </label>
         <label>配置所属项目
           <select name="projectId"><option value="">全局</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
