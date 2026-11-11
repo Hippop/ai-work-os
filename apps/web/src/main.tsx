@@ -65,7 +65,8 @@ function buildFlowRequest(form: FormData) {
     : { mode: "graph", instructions, nodes: stages };
 }
 function sampleFlow(mode: "standard" | "compose" | "graph", taskType: string) {
-  const stages = taskType === "diagnosis" ? diagnosisStages : developmentStages;
+  const stages: { operation: string; title: string; instruction?: string }[] =
+    taskType === "diagnosis" ? diagnosisStages : developmentStages;
   if (mode !== "graph") return JSON.stringify(stages, null, 2);
   return JSON.stringify(stages.map(({ operation, title, instruction }, i) => ({
     key: operation + "_1",
