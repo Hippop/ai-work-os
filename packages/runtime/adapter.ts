@@ -266,12 +266,20 @@ export function execute(
     child.once("close", (code) => finish(undefined, code ?? -1));
   });
 }
+export function runAgent(job: Job, key: string, prompt: string,
+  onChild: (child: ChildProcess | null) => void, operation?: string
+): Promise<z.infer<typeof Result>>;
+export function runAgent(job: Job, key: string, prompt: string,
+  onChild: (child: ChildProcess | null) => void, operation: string,
+  outputSchema: Record<string, unknown>
+): Promise<unknown>;
 export async function runAgent(
   job: Job,
   key: string,
   prompt: string,
   onChild: (child: ChildProcess | null) => void,
   operation = key,
+  outputSchema?: Record<string, unknown>,
 ) {
   if (
     job.runtimeConfigurationDigest &&
@@ -297,7 +305,7 @@ export async function runAgent(
     }
     return result;
   }
-  const schema = diagnostic
+  const schema = outputSchema ? strictSchema(outputSchema) : diagnostic
     ? strictSchema(z.toJSONSchema(DiagnosisResult))
     : null;
   writeFileSync(
@@ -348,5 +356,5 @@ export async function runAgent(
       `Agent ${key} exited with ${result.code}; see execution logs`,
     );
   const parsed = JSON.parse(readFileSync(resultPath, "utf8"));
-  return diagnostic ? DiagnosisResult.parse(parsed) : Result.parse(parsed);
+  return outputSchema ? parsed : diagnostic ? DiagnosisResult.parse(parsed) : Result.parse(parsed);
 }
