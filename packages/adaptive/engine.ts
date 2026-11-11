@@ -276,6 +276,11 @@ export class AdaptiveEngine {
   private save(run: AdaptiveRun) {
     run.updatedAt = new Date().toISOString(); this.store.put("adaptive_run", run);
   }
+  /** Keep the task aggregate synchronized with the adaptive execution lifecycle. */
+  private setTaskStatus(taskId: string, status: "planned" | "awaiting_acceptance") {
+    const task = this.store.get<Task>("task", taskId);
+    if (task) this.store.put("task", { ...task, status, updatedAt: new Date().toISOString() });
+  }
   /** Running capabilities remain uncertain; interrupted read-only evaluations can be manually resumed. */
   recover() {
     this.store.transaction(() => {
@@ -380,6 +385,7 @@ export class AdaptiveEngine {
             if (!["queued", "running"].includes(stale.status)) return;
             stale.status = "failed";
             this.save(stale);
+            this.setTaskStatus(stale.taskId, "planned");
             this.store.event(run.id, "adaptive.budget.time_exceeded", {
               taskId:run.taskId, maxMinutes:task?.maxMinutes ?? 30,
               elapsedMinutes:Math.floor((Date.now()-Date.parse(stale.createdAt))/60000),
@@ -412,6 +418,7 @@ export class AdaptiveEngine {
           this.store.transaction(() => {
             const current = this.get(run.id);
             current.status = "awaiting_acceptance"; this.save(current);
+            this.setTaskStatus(current.taskId, "awaiting_acceptance");
             this.store.event(current.id, "adaptive.run.delivered", {
               results: Object.keys(current.results),
               skipped: Object.entries(current.nodeStates).filter(([,v]) => v === "skipped").map(([k]) => k),
@@ -421,6 +428,7 @@ export class AdaptiveEngine {
           !run.plan.observations.some((o) => run.observationStates[o.id] === "pending")) {
           this.store.transaction(() => {
             const current = this.get(run.id); current.status = "failed"; this.save(current);
+            this.setTaskStatus(current.taskId, "planned");
             this.store.event(current.id, "adaptive.run.failed", { failures: current.failures });
           });
         }
@@ -551,7 +559,10 @@ export class AdaptiveEngine {
         run.observationStates[checkpointId] = "completed";
         if (decision.decision === "WAIT_INPUT" || decision.decision === "WAIT_APPROVAL" || decision.decision === "REPLAN" ||
             decision.decision === "STOP" || decision.decision === "RETRY") run.status = "waiting";
-        if (decision.decision === "STOP") run.status = "failed";
+        if (decision.decision === "STOP") {
+          run.status = "failed";
+          this.setTaskStatus(run.taskId, "planned");
+        }
         this.save(run); this.store.event(id, "adaptive.observation.decided", { checkpointId, decision });
       });
       if (decision.decision === "REPLAN") await this.replan(id, checkpointId);
@@ -730,6 +741,7 @@ export class AdaptiveEngine {
           state === "failed" && ["workspace-write", "external-write"]
             .includes(run.snapshots[key]?.capability.sideEffect ?? ""));
         run.status = writesHaveFailed ? "failed" : "waiting";
+        if (writesHaveFailed) this.setTaskStatus(run.taskId, "planned");
       }
       this.save(run);
       for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
