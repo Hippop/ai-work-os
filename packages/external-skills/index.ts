@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync, existsSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { z } from "zod";
 import { DomainError } from "../domain/index.js";
@@ -82,6 +82,46 @@ function readSkill(root: string, relativePath: string) {
     if (error instanceof DomainError) throw error;
     throw new DomainError("skill_unavailable", "外部Skill无法读取，请检查目录并重新扫描", 422);
   }
+}
+
+/** Only small textual references are snapshotted; scripts/assets never execute or mount implicitly. */
+function readSkillReferences(directoryPath: string) {
+  const root = join(directoryPath, "references");
+  if (!existsSync(root)) return [] as { relativePath:string; content:string; digest:string }[];
+  if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory())
+    throw new DomainError("skill_reference_root", "Skill references 必须为普通目录", 422);
+  const allowed = /\.(md|txt|json|yaml|yml)$/i;
+  const out:{ relativePath:string; content:string; digest:string }[]=[];
+  const pending=[{dir:root,depth:0}];
+  let total=0;
+  while(pending.length) {
+    const {dir,depth}=pending.shift()!;
+    const entries=readdirSync(dir,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name));
+    for(const entry of entries) {
+      if(entry.isSymbolicLink()) continue;
+      const file=join(dir,entry.name);
+      if(entry.isDirectory()) {
+        if(depth<2 && !entry.name.startsWith(".")) pending.push({dir:file,depth:depth+1});
+        continue;
+      }
+      if(!entry.isFile() || !allowed.test(entry.name)) continue;
+      const canonical=realpathSync(file);
+      assertInside(directoryPath,canonical);
+      const stat=lstatSync(file);
+      if(!stat.isFile() || stat.nlink!==1 || stat.size>16*1024)
+        throw new DomainError("skill_reference_size", "Skill 参考文件尺寸或硬链接不安全", 422);
+      if(out.length>=24 || total+stat.size>64*1024)
+        throw new DomainError("skill_reference_budget", "Skill 参考文件超过数量或总字节预算", 422);
+      const content=readFileSync(canonical,"utf8");
+      total+=stat.size;
+      out.push({
+        relativePath:relative(directoryPath,canonical).split(sep).join("/"),
+        content,
+        digest:createHash("sha256").update(content).digest("hex"),
+      });
+    }
+  }
+  return out;
 }
 
 export class ExternalSkillService {
@@ -199,6 +239,7 @@ export class ExternalSkillService {
         sources: [join(directoryPath, "SKILL.md")],
         content: skill.content,
         contentDigest: skill.contentDigest,
+        referenceFiles: readSkillReferences(directoryPath),
         createdAt: entry.lastScannedAt,
         external: { sourceId: source.id, relativePath: entry.relativePath, directoryPath },
       };
