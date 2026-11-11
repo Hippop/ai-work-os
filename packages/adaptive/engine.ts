@@ -243,26 +243,31 @@ export class AdaptiveEngine {
   private save(run: AdaptiveRun) {
     run.updatedAt = new Date().toISOString(); this.store.put("adaptive_run", run);
   }
-  /** On process restart, never silently replay potentially side-effecting invocations. */
+  /** Running capabilities remain uncertain; interrupted read-only evaluations can be manually resumed. */
   recover() {
     this.store.transaction(() => {
       for (const run of this.store.list<AdaptiveRun>("adaptive_run")) {
-        if (Object.values(run.nodeStates).some((s) => s === "running") ||
-            Object.values(run.observationStates).some((s) => s === "running")) {
-          for (const key of Object.keys(run.nodeStates)) if (run.nodeStates[key] === "running") {
-            run.nodeStates[key] = "uncertain";
-            for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
-              x.runId === run.id && x.nodeId === key && x.status === "running")) {
-              this.store.put("adaptive_invocation", { ...invocation, status: "uncertain" });
-              const effect = this.store.get<any>("adaptive_side_effect", invocation.id);
-              if (effect) this.store.put("adaptive_side_effect", { ...effect, state: "uncertain", reason: "controller_restart" });
-            }
+        const runningNodes = Object.entries(run.nodeStates).filter(([, state]) => state === "running");
+        const runningObservations = Object.entries(run.observationStates).filter(([, state]) => state === "running");
+        if (!runningNodes.length && !runningObservations.length) continue;
+        for (const [key] of runningNodes) {
+          run.nodeStates[key] = "uncertain";
+          for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
+            x.runId === run.id && x.nodeId === key && x.status === "running")) {
+            this.store.put("adaptive_invocation", { ...invocation, status: "uncertain" });
+            const effect = this.store.get<any>("adaptive_side_effect", invocation.id);
+            if (effect) this.store.put("adaptive_side_effect",
+              { ...effect, state: "uncertain", reason: "controller_restart" });
           }
-          for (const key of Object.keys(run.observationStates)) if (run.observationStates[key] === "running") run.observationStates[key] = "waiting";
-          run.status = "reconciling";
-          this.save(run);
-          this.store.event(run.id, "adaptive.recovery.required", { reason: "控制服务重启，执行器副作用状态未确认" });
         }
+        for (const [id] of runningObservations) run.observationStates[id] = "waiting";
+        run.status = runningNodes.length ? "reconciling" : "waiting";
+        this.save(run);
+        this.store.event(run.id, "adaptive.recovery.required", {
+          uncertainNodes: runningNodes.map(([id]) => id),
+          interruptedCheckpoints: runningObservations.map(([id]) => id),
+          reason: runningNodes.length ? "running_invocation_needs_reconciliation" : "evaluation_interrupted",
+        });
       }
     });
   }
@@ -506,11 +511,29 @@ export class AdaptiveEngine {
     } catch (error) {
       this.store.transaction(() => {
         const run = this.get(id);
-        if (run.observationStates[checkpointId] !== "running") return;
-        run.observationStates[checkpointId] = "waiting"; run.status = "waiting"; this.save(run);
-        this.store.event(id, "adaptive.observation.blocked", { checkpointId, reason: String(error).slice(0, 1000) });
+        if (!["running", "completed"].includes(run.observationStates[checkpointId])) return;
+        // A failed replan after a persisted REPLAN decision must remain actionable.
+        if (run.observationStates[checkpointId] === "running")
+          run.observationStates[checkpointId] = "waiting";
+        if (run.status !== "reconciling") run.status = "waiting";
+        this.save(run);
+        this.store.event(id, "adaptive.observation.blocked", {
+          checkpointId, decision: run.decisions[checkpointId]?.decision ?? null,
+          reason: String(error).slice(0, 1000),
+        });
       });
     }
+  }
+  /** Explicit retry for a previously blocked REPLAN decision (e.g. unavailable Codex). */
+  async resumeReplan(id: string, checkpointId: string): Promise<AdaptiveRun> {
+    const run = this.get(id);
+    if (run.status !== "waiting" ||
+        run.decisions[checkpointId]?.decision !== "REPLAN" ||
+        run.observationStates[checkpointId] !== "completed")
+      throw new DomainError("replan_not_waiting", "无待恢复的重规划决策", 422);
+    const revised = await this.replan(id, checkpointId);
+    this.notify();
+    return revised;
   }
   async replan(id: string, checkpointId: string): Promise<AdaptiveRun> {
     const before = this.get(id), decision = before.decisions[checkpointId];
