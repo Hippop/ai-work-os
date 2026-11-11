@@ -11,6 +11,7 @@ import { createWorkspace, exportChanges, git, workspaceDigest } from "../workspa
 import { PlanInput, DecisionInput, type CapabilityCall, type Executor, type Planner, type AdaptiveRun, type EvalCall } from "./engine.js";
 import { AssetService, CapabilityInput, type Capability } from "./assets.js";
 import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
+import { BudgetService } from "./budget.js";
 import { summarizeCodexEvents } from "./telemetry.js";
 
 function strict(schema: any): any {
@@ -256,7 +257,11 @@ export class AdaptiveRuntime {
         context: { knowledge: call.knowledge.map((x) => ({ id:x.id, digest:x.digest })) },
       };
       const isolated = isolatedCodexHome(renderMcpConfig(mcp));
+      const budget = new BudgetService(this.store);
+      let reserved = false;
       try {
+        const record = budget.reserve(call.run.id,call.invocationId,profile,call.run.budgetUsd??null);
+        reserved = record !== null;
         const output = await runAgent({ ...job, env: isolated.env },
           sanitizeName(call.node.id), prompt, this.child,
           profile.workspaceMode === "worktree-write" ? "implement" : "analyze",
@@ -276,8 +281,14 @@ export class AdaptiveRuntime {
               inputDigest:item.inputDigest, outputDigest:item.outputDigest,
             }, "agent");
         } catch { /* old Codex event formats may omit optional telemetry */ }
+        if (reserved)
+          budget.settle(call.invocationId,modelUsage,profile,call.run.budgetUsd??null);
         return { output, artifacts: [join(folder, "result.json")], modelUsage };
-      } finally { isolated.dispose(); }
+      } finally {
+        try {
+          if (reserved) budget.unverified(call.invocationId,"invocation_exit_without_verified_usage");
+        } finally { isolated.dispose(); }
+      }
     };
   }
   /** Real, read-only Codex sample execution. Requires a configured CLI and explicit project authorization. */
