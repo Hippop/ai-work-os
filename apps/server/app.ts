@@ -596,7 +596,9 @@ export function createApp(
     const run = adaptive.get(req.params.id);
     const record = new BudgetService(store).list(run.id).find((c)=>c.id===req.params.invocationId);
     if (!record) throw new DomainError("cost_not_found","该运行没有对应费用记录",404);
-    const profile = adaptiveAssets.getProfile(record.profileRef);
+    const profile = Object.values(run.snapshots)
+      .find((entry) => entry.profile.id === record.profileRef)?.profile;
+    if (!profile) throw new DomainError("profile_snapshot_missing","费用核对缺少原始执行配置快照",409);
     const b = z.object({
       inputTokens:z.number().int().nonnegative(),
       outputTokens:z.number().int().nonnegative(),
