@@ -1,3 +1,4 @@
+import { bootstrapAdaptiveAssets } from "../../packages/adaptive/bootstrap.js";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,7 @@ const supervisor = new Supervisor(
   process.env.AI_WORK_OS_CODEX ?? "codex",
 );
 supervisor.start();
+bootstrapAdaptiveAssets(store);
 const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
 const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
 adaptive.recover();
