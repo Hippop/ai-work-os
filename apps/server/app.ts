@@ -4,6 +4,7 @@ import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { McpRegistry } from "../../packages/adaptive/mcp.js";
+import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join } from "node:path";
@@ -539,6 +540,13 @@ export function createApp(
   });
   app.post("/api/v2/tasks/:id/compose", async (req, res) =>
     res.json({ plan: await adaptive.compose(req.params.id) }));
+  app.get("/api/v2/analytics", (req, res) => {
+    const params = z.object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+      limit: z.coerce.number().int().min(1).max(5000).default(2000),
+    }).parse(req.query);
+    res.json(new AdaptiveObservability(store).report(params));
+  });
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
   app.post("/api/v2/adaptive-runs", (req, res) => {
     const b = z.object({ taskId: z.string().uuid(), plan: z.unknown() }).parse(req.body);
