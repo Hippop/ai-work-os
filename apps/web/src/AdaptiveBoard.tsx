@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { Task, Project } from "../../../packages/domain/index";
+import { McpWriteBoard } from "./McpWriteBoard";
 type API = (path: string, data?: unknown, headers?: Record<string, string>) => Promise<any>;
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
@@ -184,6 +185,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         })}>撤销 MCP</button>}
       </div>)}
     </div>
+    <McpWriteBoard api={api} act={act} projects={projects} servers={mcpServers}/>
     <div className="panel">
       <h2>Execution Profile · 执行配置</h2>
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/profiles", {
