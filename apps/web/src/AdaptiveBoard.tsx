@@ -78,6 +78,14 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
     link.href=url;link.download=name;link.click();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
+  async function downloadRunAudit(runId:string) {
+    const audit=await api("/v2/adaptive-runs/"+runId+"/audit");
+    const blob=new Blob([JSON.stringify(audit,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=url;link.download="adaptive-audit-"+runId+".json";link.click();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
   const current = runs.find((r) => r.id === selectedRun);
   function doForm(event: FormEvent<HTMLFormElement>, fn: (form: FormData) => Promise<unknown>) {
     event.preventDefault(); const form = event.currentTarget;
@@ -542,6 +550,9 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       </label>
       {current && <>
         <p>状态：<strong>{current.status}</strong> · 计划版本：{current.planRevision}</p>
+        <button className="quiet" onClick={()=>void act(async()=>downloadRunAudit(current.id))}>
+          下载本次运行审计摘要（SHA-256 链，原始参数与模型输出已省略）
+        </button>
         {costInfo && <details>
           <summary>模型费用账本（已知用量与预算预留）</summary>
           <p>运行预算：{costInfo.runBudgetUsd ?? "未配置"} USD · 已记录费用：
