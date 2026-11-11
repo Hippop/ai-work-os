@@ -7,6 +7,7 @@ export type Job = {
   outputDir: string;
   command: string;
   commandPrefix: string[];
+  env?: NodeJS.ProcessEnv;
   objective: string;
   criteria: string[];
   flowInstructions?: string;
