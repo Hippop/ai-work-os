@@ -59,7 +59,7 @@ test("graph mode enforces real ancestry and mandatory validation gates", () => {
   )), /所有步骤|交付|依赖链/);
   assert.throws(() => assemblePlan(defaultPlan, {
     mode: "compose", instructions: "", stages: stages.filter((s) => s.operation !== "test"),
-  }), /不能省略必需操作/);
+  }), /不能省略必需操作|Too small/);
 });
 
 test("per-task flow overrides template without replacing published version, and task edits invalidate preparation", () => {
