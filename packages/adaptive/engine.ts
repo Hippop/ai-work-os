@@ -65,7 +65,11 @@ export type Planner = {
   compose(task: Task, catalog: Capability[], knowledge: ReturnType<AssetService["retrieveKnowledge"]>, previous?: AdaptiveRun): Promise<Plan>;
   evaluate(context: EvalCall): Promise<Decision>;
 };
-export type Executor = (call: CapabilityCall) => Promise<{ output: unknown; artifacts?: string[]; businessStatus?: "accepted" | "rejected" | "unknown" }>;
+export type Executor = (call: CapabilityCall) => Promise<{
+  output: unknown; artifacts?: string[];
+  businessStatus?: "accepted" | "rejected" | "unknown";
+  modelUsage?: { inputTokens?: number; outputTokens?: number };
+}>;
 
 function byId<T extends { id: string }>(items: T[]) { return new Map(items.map((item) => [item.id, item])); }
 export class AdaptiveEngine {
@@ -139,7 +143,7 @@ export class AdaptiveEngine {
         throw new DomainError("binding_missing", "缺少能力必填输入：" + node.id + "." + field, 422);
     }
     const terminals = sorted.filter((n) => !sorted.some((other) => other.dependsOn.includes(n.id)));
-    if (terminals.length !== 1 || !capabilities.get(terminals[0].id)?.tags.includes("deliver"))
+    if (terminals.length !== 1 || terminals[0].condition || !capabilities.get(terminals[0].id)?.tags.includes("deliver"))
       throw new DomainError("delivery_required", "必须有唯一交付汇合节点", 422);
     function precedes(from: string, to: string): boolean {
       const q = [...(by.get(to)?.dependsOn ?? [])], seen = new Set<string>();
@@ -421,7 +425,11 @@ export class AdaptiveEngine {
         const run = this.get(id);
         if (run.nodeStates[nodeId] !== "running") return;
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
-        this.store.put("adaptive_invocation", { ...record, status: "succeeded", finishedAt: new Date().toISOString(), outputDigest: digest(response.output) });
+        this.store.put("adaptive_invocation", { ...record, status: "succeeded",
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - Date.parse(record.startedAt),
+          modelUsage: response.modelUsage ?? null,
+          outputDigest: digest(response.output) });
         const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
         if (effect) this.store.put("adaptive_side_effect", {
           ...effect, state: "confirmed", outputDigest: digest(response.output),
@@ -440,7 +448,8 @@ export class AdaptiveEngine {
         const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
         const uncertain = !!effect;
         this.store.put("adaptive_invocation", { ...record, status: uncertain ? "uncertain" : "failed",
-          finishedAt: new Date().toISOString(), error: message });
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - Date.parse(record.startedAt), error: message });
         if (effect) this.store.put("adaptive_side_effect", {
           ...effect, state: "uncertain", reason: message, at: new Date().toISOString(),
         });
