@@ -40,7 +40,7 @@ type NState = "pending" | "running" | "succeeded" | "skipped" | "failed" | "wait
 type OState = "pending" | "running" | "waiting" | "completed";
 export type AdaptiveRun = {
   id: string; taskId: string; status: "queued" | "running" | "waiting" | "reconciling" | "failed" | "awaiting_acceptance" | "done" | "cancelled";
-  planRevision: number; plan: Plan; snapshots: Record<string, { capability: Capability; profileRef: string | null; profile: Profile; skillInstructions: { id: string; name: string; content: string; digest: string }[] }>;
+  planRevision: number; plan: Plan; snapshots: Record<string, { capability: Capability; profileRef: string | null; profile: Profile; skillInstructions: { id: string; name: string; content: string; digest: string; references: {relativePath:string;content:string;digest:string}[] }[] }>;
   nodeStates: Record<string, NState>; observationStates: Record<string, OState>;
   results: Record<string, { output: unknown; artifactRefs: string[]; invocationId: string; digest: string }>;
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
@@ -245,7 +245,7 @@ export class AdaptiveEngine {
         if (!profileRef) throw new DomainError("profile_required", "未绑定执行配置", 422);
         const profile = this.assets.getProfile(profileRef);
         const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
-          .map((skill) => ({ id: skill.id, name: skill.name, content: skill.content, digest: skill.contentDigest }));
+          .map((skill) => ({ id: skill.id, name: skill.name, content: skill.content, digest: skill.contentDigest, references: skill.referenceFiles }));
         if (JSON.stringify(skillInstructions).length > 80000)
           throw new DomainError("skill_context_budget", "Skill 指令快照超过运行预算", 422);
         if (cap.sourceSkillId) {
@@ -621,7 +621,7 @@ export class AdaptiveEngine {
         if (!profileRef) throw new DomainError("profile_required", "执行配置缺失", 422);
         const profile = this.assets.getProfile(profileRef);
         const skillInstructions = new ExternalSkillService(this.store).snapshot(profile.skillIds)
-          .map((sk) => ({ id:sk.id, name:sk.name, content:sk.content, digest:sk.contentDigest }));
+          .map((sk) => ({ id:sk.id, name:sk.name, content:sk.content, digest:sk.contentDigest, references:sk.referenceFiles }));
         if (JSON.stringify(skillInstructions).length > 80000)
           throw new DomainError("skill_context_budget", "Skill 快照超过预算", 422);
         if (cap.sourceSkillId && !skillInstructions.some((sk) => sk.id === cap.sourceSkillId && sk.digest === cap.sourceDigest))
