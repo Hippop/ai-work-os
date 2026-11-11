@@ -611,6 +611,8 @@ export function createApp(
     const b = z.object({ nodeId: z.string().min(1) }).parse(req.body);
     res.json(adaptive.retry(req.params.id, b.nodeId));
   });
+  app.post("/api/v2/adaptive-runs/:id/observations/:checkpointId/replan", async (req, res) =>
+    res.json(await adaptive.resumeReplan(req.params.id, req.params.checkpointId)));
   app.post("/api/v2/adaptive-runs/:id/observations/:checkpointId/decision", (req, res) =>
     res.json(adaptive.resolveWaiting(req.params.id, req.params.checkpointId, req.body)));
   app.get("/api/v2/asset-events/:kind/:id", (req, res) =>
