@@ -421,19 +421,44 @@ export class AssetService {
       const binding = bindings.find((b) => b.knowledgeRef === k.id);
       const hay = (k.title + " " + k.name + " " + k.tags.join(" ") + " " + k.content).toLowerCase();
       const terms = search.split(/\s+/).filter(Boolean);
-      const score = (binding?.mode === "required" ? 100 : 0) + (terms.length && terms.every((t) => hay.includes(t)) ? 10 : 0) +
-        (binding ? 2 : 0);
-      return { k, score };
-    }).filter(({ k, score }) => score > 0 || required.some((r) => r.knowledgeRef === k.id))
-      .sort((a,b) => b.score - a.score || a.k.id.localeCompare(b.k.id)).slice(0, Math.min(20, Math.max(required.length, max)));
-    const results = scored.map(({ k }) => ({
-      id: k.id, title: k.title, version: k.version, name: k.name,
-      content: k.content, digest: digest(k.content),
-      scope: k.scope, source: k.source, evidenceRefs: k.evidenceRefs,
-    }));
+      const matched = terms.length > 0 && terms.every((t) => hay.includes(t));
+      const score = (binding?.mode === "required" ? 100 : 0) +
+        (matched ? 10 : 0) +
+        (binding?.mode === "optional" ? 2 : 0);
+      // "on-demand" means explicitly relevant to the query; mere binding is not an injection grant.
+      return { k, score, matched, binding };
+    }).filter(({ k, score, matched, binding }) =>
+      (binding?.mode === "on-demand" ? matched : score > 0) ||
+      required.some((r) => r.knowledgeRef === k.id))
+      .sort((a,b) => b.score - a.score || a.k.id.localeCompare(b.k.id))
+      .slice(0, Math.min(20, Math.max(required.length, max)));
+    const results: {
+      id:string;title:string;version:string;name:string;content:string;digest:string;
+      scope:string;source:string;evidenceRefs:string[];
+    }[] = [];
+    // Model prompts currently allocate 10k characters for knowledge. Never silently truncate
+    // a required document through a later JSON slice; fail admission instead.
+    const maxContextChars = 9000;
+    let omittedByBudget = 0;
+    for (const { k } of scored) {
+      const item = {
+        id:k.id,title:k.title,version:k.version,name:k.name,
+        content:k.content,digest:digest(k.content),scope:k.scope,source:k.source,
+        evidenceRefs:k.evidenceRefs,
+      };
+      if (JSON.stringify([...results,item]).length > maxContextChars) {
+        if (required.some((r)=>r.knowledgeRef===k.id))
+          throw new DomainError("required_knowledge_context_budget",
+            "必需知识超出 Agent 上下文预算，必须先拆分或精简",422);
+        omittedByBudget++;
+        continue;
+      }
+      results.push(item);
+    }
     this.store.event(taskId ? "task:" + taskId : "knowledge:search", "knowledge.retrieved", {
       queryDigest: digest(query), projectId, capabilityName,
       returned: results.map((item) => ({ id: item.id, digest: item.digest })),
+      omittedByBudget, maxContextChars,
     });
     return results;
   }
