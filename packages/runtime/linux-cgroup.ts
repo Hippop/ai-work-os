@@ -45,14 +45,16 @@ export function createLinuxCgroup(limits: CgroupLimits): ManagedCgroup {
     throw error;
   }
   const populated=()=>{
+    if (!existsSync(folder)) return false;
     const match=readFileSync(join(folder,"cgroup.events"),"utf8").match(/^populated\s+([01])$/m);
     if (!match) throw new Error("cgroup.events does not expose a populated state");
     return match[1]==="1";
   };
   return {
     path:folder,populated,
-    kill() { writeFileSync(join(folder,"cgroup.kill"),"1"); },
+    kill() { if (existsSync(folder)) writeFileSync(join(folder,"cgroup.kill"),"1"); },
     cleanup() {
+      if (!existsSync(folder)) return;
       if (populated()) throw new Error("Cgroup still contains live processes");
       rmdirSync(folder);
     },
