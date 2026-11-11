@@ -29,6 +29,12 @@ export const ExecutionProfileInput = z.object({
   }).optional(),
   timeoutSeconds: z.number().int().min(1).max(3600).default(300),
   maxCostUsd: z.number().min(0).max(100).default(2),
+  billing: z.object({
+    inputUsdPerMillion: z.number().finite().min(0).max(1000),
+    outputUsdPerMillion: z.number().finite().min(0).max(1000),
+    reservedInputTokens: z.number().int().min(1).max(10_000_000),
+    reservedOutputTokens: z.number().int().min(1).max(10_000_000),
+  }).strict().optional(),
 });
 export const CapabilityInput = z.object({
   name: key, version, title: z.string().trim().min(1).max(160),
