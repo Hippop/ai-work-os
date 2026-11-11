@@ -73,6 +73,8 @@ export function checkSchema(schema: Record<string, unknown>, value?: unknown): v
     const required = node.required as unknown;
     if (properties && (type !== "object" || Array.isArray(properties) || typeof properties !== "object"))
       throw new DomainError("schema_invalid", "properties 必须是对象字段表", 422);
+    if (Array.isArray(required) && required.some((x) => typeof x === "string" && !Object.hasOwn(properties ?? {}, x)))
+      throw new DomainError("schema_invalid", "required 引用了未声明字段", 422);
     if (required !== undefined && (!Array.isArray(required) || required.some((x) => typeof x !== "string")))
       throw new DomainError("schema_invalid", "required 应是字符串数组", 422);
     if (node.enum !== undefined && (!Array.isArray(node.enum) || !node.enum.length))
@@ -292,7 +294,15 @@ export class AssetService {
       return { k, score };
     }).filter(({ k, score }) => score > 0 || required.some((r) => r.knowledgeRef === k.id))
       .sort((a,b) => b.score - a.score || a.k.id.localeCompare(b.k.id)).slice(0, Math.min(20, Math.max(required.length, max)));
-    return scored.map(({ k }) => ({ id: k.id, title: k.title, content: k.content, digest: digest(k.content), scope: k.scope, source: k.source, evidenceRefs: k.evidenceRefs }));
+    const results = scored.map(({ k }) => ({
+      id: k.id, title: k.title, content: k.content, digest: digest(k.content),
+      scope: k.scope, source: k.source, evidenceRefs: k.evidenceRefs,
+    }));
+    this.store.event(taskId ? "task:" + taskId : "knowledge:search", "knowledge.retrieved", {
+      queryDigest: digest(query), projectId, capabilityName,
+      returned: results.map((item) => ({ id: item.id, digest: item.digest })),
+    });
+    return results;
   }
   /** Source-preserving deterministic draft; not represented as model-verified AI output. */
   draftFromSkill(skillId: string): Capability {
