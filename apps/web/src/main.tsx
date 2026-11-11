@@ -974,7 +974,7 @@ function App() {
                       />
                     </label>
                   )}
-                  {flowMode === "compose" && <p>每个步骤包含 operation、title 和可选 instruction。系统按填写顺序串接，并自动生成依赖。</p>}
+                  {flowMode === "compose" && <p>每个步骤包含 operation、title 和可选 instruction。系统按填写顺序串接，并自动生成依赖。多个 test 步骤目前仍执行同一项目测试命令。</p>}
                   {flowMode === "graph" && <p>每个节点包含 key、operation、title、dependsOn 和可选 instruction。系统执行环依赖校验并采用拓扑顺序串行执行。</p>}
                   <button type="button" className="quiet" onClick={(event) => {
                     const form = event.currentTarget.form;
