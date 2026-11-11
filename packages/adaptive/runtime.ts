@@ -177,7 +177,7 @@ export class AdaptiveRuntime {
     const task: Task = {
       id: randomUUID(), title: "Skill analysis", objective: "Extract atomic capability contract from Skill", type: "development",
       projectId, acceptanceCriteria: ["Output must be validated by a user"], priority: "normal", maxMinutes: 10,
-      skillVersionIds: [], knowledgeVersionIds: [], workflowVersionId: null, flowRequirements: null,
+      skillVersionIds: [], externalSkillIds: [], knowledgeVersionIds: [], workflowVersionId: null, flowRequirements: null,
       resourceFamilyIds: [], parentId: null, goalId: null, dependsOn: [], plannedFor: null, dueAt: null,
       status: "planned", revision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
