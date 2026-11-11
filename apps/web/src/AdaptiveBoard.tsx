@@ -273,6 +273,21 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
         <b>{c.id}</b> · {c.status} · {c.profileRef ?? "未绑定配置"}
         <p>{c.description}</p>
         {c.status === "candidate" && <button className="quiet" onClick={() => {
+          const projectId = window.prompt("使用哪个已授权项目 ID 执行只读契约样例验证？", skillProjectId);
+          if (!projectId) return;
+          const value = window.prompt("输入待测试的 JSON 样例", '{"objective":"Inspect code"}');
+          if (!value) return;
+          let sampleInput: unknown;
+          try { sampleInput = JSON.parse(value); }
+          catch { window.alert("样例输入不是有效 JSON"); return; }
+          void act(async () => {
+            const result = await api("/v2/capabilities/" + encodeURIComponent(c.id) + "/sample-run",
+              { projectId, sampleInput });
+            setNotice("真实 Codex 只读样例运行成功（仍需人工审核）："
+              + JSON.stringify(result.output).slice(0, 700)); await load();
+          });
+        }}>Codex 只读样例验证</button>}
+        {c.status === "candidate" && <button className="quiet" onClick={() => {
           const profileRef = window.prompt("绑定已发布的 Execution Profile ID（例如 review.readonly@1.0.0）", c.profileRef ?? "");
           if (profileRef === null || !profileRef.trim()) return;
           void act(async () => {
