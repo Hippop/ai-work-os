@@ -558,6 +558,14 @@ export function createApp(
     const b = z.object({ taskId: z.string().uuid(), plan: z.unknown() }).parse(req.body);
     res.status(201).json(adaptive.createRun(b.taskId, b.plan));
   });
+  app.post("/api/v2/adaptive-runs/:id/extract-knowledge", async (req, res) => {
+    const b = z.object({
+      name: z.string().min(1).max(120),
+      version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    }).parse(req.body);
+    if (!adaptiveRuntime) throw new DomainError("runtime_unavailable", "模型运行器不可用", 503);
+    res.status(201).json(await adaptiveRuntime.extractRunKnowledge(req.params.id, b.name, b.version));
+  });
   app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
   app.get("/api/v2/adaptive-runs/:id/side-effects", (req, res) =>
