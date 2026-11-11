@@ -3,6 +3,7 @@ import { AssetService } from "../../packages/adaptive/assets.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
+import { McpRegistry } from "../../packages/adaptive/mcp.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join } from "node:path";
@@ -468,6 +469,14 @@ export function createApp(
   app.post("/api/v2/capabilities/:id/revoke", (req, res) => {
     adaptiveAssets.revokeCapability(req.params.id); res.json({ status: "revoked" });
   });
+  const mcpRegistry = new McpRegistry(store);
+  app.get("/api/v2/mcp-servers", (_req, res) => res.json(mcpRegistry.list()));
+  app.post("/api/v2/mcp-servers", (req, res) =>
+    res.status(201).json(mcpRegistry.register(req.body)));
+  app.post("/api/v2/mcp-servers/:id/publish", (req, res) =>
+    res.json(mcpRegistry.publish(req.params.id)));
+  app.post("/api/v2/mcp-servers/:id/revoke", (req, res) =>
+    res.json(mcpRegistry.revoke(req.params.id)));
   app.get("/api/v2/profiles", (_req, res) => res.json(store.list("adaptive_profile")));
   app.post("/api/v2/profiles", (req, res) => res.status(201).json(adaptiveAssets.createProfile(req.body)));
   app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
