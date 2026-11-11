@@ -110,10 +110,11 @@ export class AdaptiveRuntime {
       }
       if (!project) throw new DomainError("project_required", "执行能力必须关联项目", 422);
       if (!project.allowAgent) throw new DomainError("agent_not_authorized", "项目未授权 Agent 执行", 422);
-      if (profile.executor === "program") {
-        if (!profile.program || !project.testCommand ||
+      if (profile.executor === "program" || profile.executor === "project-test") {
+        if (!project.testCommand) throw new DomainError("test_command_required", "项目未配置可执行测试程序", 422);
+        if (profile.executor === "program" && (!profile.program ||
           profile.program.executable !== project.testCommand.executable ||
-          JSON.stringify(profile.program.args) !== JSON.stringify(project.testCommand.args))
+          JSON.stringify(profile.program.args) !== JSON.stringify(project.testCommand.args)))
           throw new DomainError("program_not_allowed", "只能执行项目已授权的测试命令", 403);
       }
       if (profile.mcpGrants.length) throw new DomainError("mcp_isolation_missing", "尚未实现逐 Profile 的 MCP 权限隔离，拒绝执行", 422);
