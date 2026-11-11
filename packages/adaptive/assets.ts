@@ -364,7 +364,38 @@ export class AssetService {
       const k = this.getKnowledge(b.knowledgeRef);
       if (!this.accessible(k, projectId, taskId, capabilityName)) throw new DomainError("required_knowledge_missing", "必需知识不可访问或已撤销", 422);
     }
-    const allowed = this.listKnowledge().filter((k) => this.accessible(k, projectId, taskId, capabilityName));
+    // Version conflict prevention: one active version per knowledge identity/scope.
+    // Explicit bindings pin their referenced versions; required bindings take priority.
+    const identity = (k: Knowledge) => [k.name,k.scope,k.projectId??"",k.taskId??"",
+      [...k.capabilityNames].sort().join(",")].join("|");
+    const requiredIdentity = new Map<string,string>();
+    for(const binding of required) {
+      const k = this.getKnowledge(binding.knowledgeRef);
+      const key = identity(k);
+      if(requiredIdentity.has(key) && requiredIdentity.get(key)!==k.id)
+        throw new DomainError("knowledge_version_conflict",
+          "同一知识身份同时绑定多个必需版本，需要先解除冲突",422);
+      requiredIdentity.set(key,k.id);
+    }
+    const candidates = this.listKnowledge().filter((k) =>
+      this.accessible(k, projectId, taskId, capabilityName));
+    const byIdentity = new Map<string,Knowledge[]>();
+    for(const k of candidates) {
+      const name=identity(k);
+      byIdentity.set(name,[...(byIdentity.get(name)??[]),k]);
+    }
+    const allowed:Knowledge[]=[];
+    const compareVersion=(a:Knowledge,b:Knowledge)=>{
+      const av=a.version.split(".").map(Number),bv=b.version.split(".").map(Number);
+      for(let i=0;i<3;i++)if(av[i]!==bv[i])return bv[i]-av[i];
+      return a.id.localeCompare(b.id);
+    };
+    for(const group of byIdentity.values()) {
+      const pinned=group.filter((k)=>bindings.some((b)=>b.knowledgeRef===k.id));
+      const requiredPinned=pinned.filter((k)=>required.some((b)=>b.knowledgeRef===k.id));
+      allowed.push([...(requiredPinned.length?requiredPinned:pinned.length?pinned:group)]
+        .sort(compareVersion)[0]);
+    }
     const scored = allowed.map((k) => {
       const binding = bindings.find((b) => b.knowledgeRef === k.id);
       const hay = (k.title + " " + k.name + " " + k.tags.join(" ") + " " + k.content).toLowerCase();
@@ -375,7 +406,8 @@ export class AssetService {
     }).filter(({ k, score }) => score > 0 || required.some((r) => r.knowledgeRef === k.id))
       .sort((a,b) => b.score - a.score || a.k.id.localeCompare(b.k.id)).slice(0, Math.min(20, Math.max(required.length, max)));
     const results = scored.map(({ k }) => ({
-      id: k.id, title: k.title, content: k.content, digest: digest(k.content),
+      id: k.id, title: k.title, version: k.version, name: k.name,
+      content: k.content, digest: digest(k.content),
       scope: k.scope, source: k.source, evidenceRefs: k.evidenceRefs,
     }));
     this.store.event(taskId ? "task:" + taskId : "knowledge:search", "knowledge.retrieved", {
