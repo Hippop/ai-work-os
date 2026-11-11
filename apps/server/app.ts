@@ -7,9 +7,9 @@ import { McpRegistry } from "../../packages/adaptive/mcp.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import express from "express";
 import { z, ZodError } from "zod";
-import { resolve, join } from "node:path";
+import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { Store } from "../../packages/persistence/index.js";
 import { WorkService } from "../../packages/workflow/service.js";
 import { PlanningService } from "../../packages/planning/index.js";
@@ -565,6 +565,26 @@ export function createApp(
     }).parse(req.body);
     if (!adaptiveRuntime) throw new DomainError("runtime_unavailable", "模型运行器不可用", 503);
     res.status(201).json(await adaptiveRuntime.extractRunKnowledge(req.params.id, b.name, b.version));
+  });
+  app.get("/api/v2/adaptive-runs/:id/artifacts/:nodeId/:name", (req, res) => {
+    if (!dataDir) throw new DomainError("artifact_unavailable", "工件目录未配置", 404);
+    const run = adaptive.get(req.params.id);
+    const result = run.results[req.params.nodeId];
+    const name = req.params.name;
+    if (!result || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,120}$/.test(name))
+      throw new DomainError("artifact_not_found", "工件不存在", 404);
+    const selected = result.artifactRefs.find((entry) => basename(entry) === name);
+    if (!selected) throw new DomainError("artifact_not_found", "工件不存在", 404);
+    const root = realpathSync(join(dataDir, "adaptive"));
+    const canonical = realpathSync(selected);
+    const rel = relative(root, canonical);
+    if (rel === ".." || rel.startsWith(".." + pathSep) || isAbsolute(rel))
+      throw new DomainError("artifact_forbidden", "工件路径不在授权目录中", 403);
+    const info = statSync(canonical);
+    if (!info.isFile() || info.size > 16 * 1024 * 1024)
+      throw new DomainError("artifact_invalid", "不支持此工件类型或大小", 422);
+    res.attachment(name);
+    res.send(readFileSync(canonical));
   });
   app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
