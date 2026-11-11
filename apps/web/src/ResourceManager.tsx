@@ -12,9 +12,11 @@ type Resource = {
 export function ResourceManager({
   api,
   act,
+  refresh,
 }: {
   api: API;
   act: (fn: () => Promise<void>) => Promise<void>;
+  refresh: () => Promise<void>;
 }) {
   const [resources, setResources] = useState<Resource[]>([]),
     [sources, setSources] = useState<{ id: string; path: string; lastScannedAt: string | null }[]>([]),
@@ -73,6 +75,7 @@ export function ResourceManager({
             setScanNotice("发现 " + result.found + " 个 Skill；" + result.missing + " 个原引用已失效。" + (result.warnings.length ? " 注意：" + result.warnings.slice(0, 5).join("；") : ""));
             form.reset();
             await load();
+            await refresh();
           });
         }}>
           <label>Skill 来源目录绝对路径
@@ -89,6 +92,7 @@ export function ResourceManager({
               const result = await api(`/skill-sources/${source.id}/scan`, {});
               setScanNotice("发现 " + result.found + " 个 Skill；" + result.missing + " 个引用失效。" + (result.warnings.length ? " 注意：" + result.warnings.slice(0, 5).join("；") : ""));
               await load();
+              await refresh();
             })}>重新扫描</button></div>
             {external.filter((item) => item.sourceId === source.id).map((skill) => (
               <div key={skill.id}>
