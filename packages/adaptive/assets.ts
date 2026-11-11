@@ -58,7 +58,10 @@ export const KnowledgeBindingInput = z.object({
 export type Profile = z.infer<typeof ExecutionProfileInput> & { id: string; status: "draft" | "published" | "revoked"; createdAt: string };
 export type Capability = z.infer<typeof CapabilityInput> & {
   id: string; status: "candidate" | "validated" | "published" | "revoked";
-  createdAt: string; validation?: { at: string; evidence: string; inputDigest: string };
+  createdAt: string; validation?: {
+    at: string; evidence: string; inputDigest: string;
+    sampleInputDigest?: string; sampleOutputDigest?: string;
+  };
 };
 export type Knowledge = z.infer<typeof KnowledgeInput> & { id: string; status: "draft" | "published" | "revoked"; createdAt: string };
 export type KnowledgeBinding = z.infer<typeof KnowledgeBindingInput> & { id: string };
@@ -190,11 +193,17 @@ export class AssetService {
       return next;
     });
   }
-  validateCapability(id: string, evidence: string): Capability {
+  validateCapability(id: string, evidence: string, sample?: { input: unknown; output: unknown }): Capability {
     if (!evidence.trim() || evidence.length > 4000) throw new DomainError("validation_evidence_required", "请提供契约验证依据", 422);
     return this.store.transaction(() => {
       const cap = this.getCapability(id, false);
       if (cap.status !== "candidate") throw new DomainError("invalid_state", "只有候选能力可进入验证", 422);
+      if (cap.sourceSkillId && !sample)
+        throw new DomainError("skill_contract_sample_required", "从 Skill 导入的能力必须提供实际输入和输出样例", 422);
+      if (sample) {
+        checkSchema(cap.inputSchema, sample.input);
+        checkSchema(cap.outputSchema, sample.output);
+      }
       if (cap.profileRef) {
         const profile = this.getProfile(cap.profileRef);
         if (cap.sideEffect === "read" && profile.workspaceMode === "worktree-write")
@@ -206,7 +215,10 @@ export class AssetService {
         const [skill] = new ExternalSkillService(this.store).snapshot([cap.sourceSkillId]);
         if (cap.sourceDigest !== skill.contentDigest) throw new DomainError("skill_changed", "源 Skill 内容已变化，需要重新生成候选", 422);
       }
-      const updated: Capability = { ...cap, status: "validated", validation: { at: new Date().toISOString(), evidence, inputDigest: digest(cap) } };
+      const updated: Capability = { ...cap, status: "validated", validation: {
+        at: new Date().toISOString(), evidence, inputDigest: digest(cap),
+        ...(sample ? { sampleInputDigest: digest(sample.input), sampleOutputDigest: digest(sample.output) } : {}),
+      } };
       this.store.put("adaptive_capability", updated); this.record("capability", id, "capability.validated", updated.validation);
       return updated;
     });
