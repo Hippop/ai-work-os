@@ -4,6 +4,7 @@ import { Store } from "../persistence/index.js";
 import { DomainError, digest, type Task } from "../domain/index.js";
 import { AssetService, checkSchema, type Capability, type Profile } from "./assets.js";
 import { ExternalSkillService } from "../external-skills/index.js";
+import { McpRegistry } from "./mcp.js";
 
 const nodeId = z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/);
 export const PlanNodeInput = z.object({
@@ -97,6 +98,10 @@ export class AdaptiveEngine {
       const profile = node.profileRef ?? cap.profileRef;
       if (!profile) throw new DomainError("profile_required", "能力未绑定执行配置：" + node.id, 422);
       const resolved = this.assets.getProfile(profile);
+      if (resolved.projectId && resolved.projectId !== projectId)
+        throw new DomainError("profile_scope", "执行配置不属于当前项目", 403);
+      if (resolved.mcpGrants.length)
+        new McpRegistry(this.store).resolve(resolved.mcpGrants, projectId);
       if (cap.sideEffect === "external-write") throw new DomainError("approval_required", "外部写入能力须走单独审批机制，当前禁止自动派发", 422);
       if (cap.sideEffect === "workspace-write" && resolved.workspaceMode !== "worktree-write")
         throw new DomainError("workspace_denied", "代码写入必须使用隔离工作区", 422);
