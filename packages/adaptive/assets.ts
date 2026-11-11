@@ -64,7 +64,7 @@ export type Capability = z.infer<typeof CapabilityInput> & {
   };
 };
 export type Knowledge = z.infer<typeof KnowledgeInput> & { id: string; status: "draft" | "published" | "revoked"; createdAt: string };
-export type KnowledgeBinding = z.infer<typeof KnowledgeBindingInput> & { id: string };
+export type KnowledgeBinding = z.infer<typeof KnowledgeBindingInput> & { id: string; status?: "active" | "revoked" };
 
 /** Deliberately limited, auditable JSON Schema subset. Reject unsupported keywords rather than silently accepting them. */
 const supported = new Set(["type", "properties", "required", "items", "enum", "additionalProperties", "minLength", "maxLength", "minimum", "maximum", "description"]);
@@ -261,6 +261,50 @@ export class AssetService {
     if (!k) throw new DomainError("knowledge_missing", "知识不存在", 404);
     return k;
   }
+  updateKnowledgeDraft(id: string, input: unknown): Knowledge {
+    const patch = z.object({
+      title: z.string().trim().min(1).max(160).optional(),
+      content: z.string().min(1).max(200000).optional(),
+      source: z.string().trim().min(1).max(2000).optional(),
+      tags: z.array(z.string().max(60)).max(30).optional(),
+      evidenceRefs: z.array(z.string().max(500)).max(50).optional(),
+      capabilityNames: z.array(key).max(40).optional(),
+    }).strict().parse(input);
+    return this.store.transaction(() => {
+      const old = this.getKnowledge(id);
+      if (old.status !== "draft")
+        throw new DomainError("knowledge_published", "只可修改草稿；已发布知识应创建新版本", 422);
+      const data = KnowledgeInput.parse({ ...old, ...patch });
+      if (data.scope === "capability" && !data.capabilityNames.length)
+        throw new DomainError("scope_required", "能力知识必须指定适用能力", 422);
+      const updated: Knowledge = { ...old, ...data };
+      this.store.put("adaptive_knowledge", updated);
+      this.record("knowledge", id, "knowledge.draft_updated", {
+        id, beforeDigest: digest(old.content), afterDigest: digest(updated.content),
+      });
+      return updated;
+    });
+  }
+  reviseKnowledge(id: string, input: unknown): Knowledge {
+    const data = z.object({
+      version: version, title: z.string().trim().min(1).max(160).optional(),
+      content: z.string().min(1).max(200000).optional(),
+      source: z.string().trim().min(1).max(2000).optional(),
+      tags: z.array(z.string().max(60)).max(30).optional(),
+      evidenceRefs: z.array(z.string().max(500)).max(50).optional(),
+      capabilityNames: z.array(key).max(40).optional(),
+    }).strict().parse(input);
+    const previous = this.getKnowledge(id);
+    if (previous.version === data.version)
+      throw new DomainError("revision_same_version", "新知识版本号必须改变", 422);
+    const result = this.createKnowledge({ ...previous, ...data });
+    this.store.transaction(() => {
+      this.record("knowledge", result.id, "knowledge.revised_from", {
+        sourceId: previous.id, sourceContentDigest: digest(previous.content),
+      });
+    });
+    return result;
+  }
   publishKnowledge(id: string): Knowledge {
     return this.store.transaction(() => {
       const k = this.getKnowledge(id);
@@ -280,12 +324,22 @@ export class AssetService {
     if (k.status !== "published") throw new DomainError("knowledge_unpublished", "只能绑定已发布知识", 422);
     if (k.scope === "capability" && !k.capabilityNames.includes(data.capabilityName))
       throw new DomainError("knowledge_forbidden", "能力不可绑定其他能力的专属知识", 403);
-    const id = digest(data), binding = { ...data, id };
+    const id = digest(data), binding: KnowledgeBinding = { ...data, id, status: "active" };
     this.store.transaction(() => { this.store.put("adaptive_knowledge_binding", binding); this.record("knowledge-binding", id, "binding.created", { ...data }); });
     return binding;
   }
   bindings(capabilityName: string) {
-    return this.store.list<KnowledgeBinding>("adaptive_knowledge_binding").filter((b) => b.capabilityName === capabilityName);
+    return this.store.list<KnowledgeBinding>("adaptive_knowledge_binding").filter((b) => b.capabilityName === capabilityName && b.status !== "revoked");
+  }
+  revokeKnowledgeBinding(id: string) {
+    return this.store.transaction(() => {
+      const binding = this.store.get<KnowledgeBinding>("adaptive_knowledge_binding", id);
+      if (!binding) throw new DomainError("binding_missing", "知识绑定不存在", 404);
+      const revoked: KnowledgeBinding = { ...binding, status: "revoked" };
+      this.store.put("adaptive_knowledge_binding", revoked);
+      this.record("knowledge-binding", id, "binding.revoked", { id });
+      return revoked;
+    });
   }
   accessible(k: Knowledge, projectId: string | null, taskId: string | null, capabilityName: string): boolean {
     return k.status === "published" &&
