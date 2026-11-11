@@ -555,9 +555,11 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
               const input=window.prompt("请填写经过供应商数据核对的 input tokens");
               const output=window.prompt("请填写经过供应商数据核对的 output tokens");
               if(input===null||output===null||!/^\d+$/.test(input)||!/^\d+$/.test(output))return;
+              const note=window.prompt("请填写供应商用量核对依据（至少 20 字）");
+              if(!note||note.trim().length<20)return;
               void act(async()=>{
                 await api("/v2/adaptive-runs/"+current.id+"/costs/"+record.id+"/reconcile",
-                  {inputTokens:Number(input),outputTokens:Number(output)});
+                  {inputTokens:Number(input),outputTokens:Number(output),note});
                 setCostInfo(await api("/v2/adaptive-runs/"+current.id+"/costs"));
               });
             }}>人工核对真实 token 用量</button>}
