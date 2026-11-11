@@ -108,7 +108,11 @@ export class McpRegistry {
 }
 function toml(value: string) { return JSON.stringify(value); }
 export function renderMcpConfig(resolved: ReturnType<McpRegistry["resolve"]>): string {
-  let content = "# Generated for one AI Work OS invocation. No inherited user MCP servers.\n";
+  // Prevent trusted project-local .codex/config.toml from injecting extra servers.
+  // The sandbox/approval CLI flags still govern the invocation itself.
+  let content = "# AI Work OS per-invocation MCP allowlist. Do not load project-local config.\n" +
+    "project_root_markers = []\n" +
+    "allow_login_shell = false\n";
   for (const { server, enabledTools } of resolved) {
     content += "\n[mcp_servers." + server.name + "]\n";
     if (server.transport.type === "http") content += "url = " + toml(server.transport.url) + "\n";
