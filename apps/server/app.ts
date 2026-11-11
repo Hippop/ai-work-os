@@ -463,6 +463,14 @@ export function createApp(
     res.status(201).json(adaptiveAssets.createCapability(req.body)));
   app.post("/api/v2/capabilities/:id/candidate", (req, res) =>
     res.json(adaptiveAssets.updateCandidate(req.params.id, req.body)));
+  app.post("/api/v2/capabilities/:id/sample-run", async (req, res) => {
+    const b = z.object({ projectId: z.string().uuid(), sampleInput: z.unknown() }).parse(req.body);
+    if (!adaptiveRuntime) throw new DomainError("runtime_unavailable", "本机模型运行器不可用", 503);
+    res.json(await adaptiveRuntime.verifyCandidate(req.params.id, b.projectId, b.sampleInput));
+  });
+  app.get("/api/v2/capabilities/:id/samples", (req, res) =>
+    res.json(store.list<{ capabilityId: string }>("adaptive_capability_sample")
+      .filter((item) => item.capabilityId === req.params.id)));
   app.post("/api/v2/capabilities/:id/validate", (req, res) => {
     const b = z.object({
       evidence: z.string(),
