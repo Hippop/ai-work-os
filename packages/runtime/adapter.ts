@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { join, resolve, isAbsolute, delimiter, extname } from "node:path";
 import { z } from "zod";
 import type { Job } from "./protocol.js";
+import { createLinuxCgroup, cgroupShellArgs, type CgroupLimits, type ManagedCgroup } from "./linux-cgroup.js";
 import { DiagnosisResult } from "../diagnosis/index.js";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -40,6 +41,7 @@ const managed = new WeakMap<
   { stopPath: string; proofPath: string; stopped?: boolean }
 >();
 const stopping = new WeakMap<ChildProcess, Promise<void>>();
+const linuxManaged = new WeakMap<ChildProcess, ManagedCgroup>();
 export function runtimeSettings() {
   let content = "";
   try {
@@ -94,6 +96,19 @@ export function stopTree(child: ChildProcess): Promise<void> {
   return result;
 }
 async function stopChild(child: ChildProcess) {
+  const linuxGroup = linuxManaged.get(child);
+  if (linuxGroup) {
+    linuxGroup.kill();
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (!linuxGroup.populated()) {
+        linuxGroup.cleanup();
+        linuxManaged.delete(child);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new UnconfirmedStop("Linux cgroup termination was not confirmed");
+  }
   const group = managed.get(child);
   if (group) {
     if (child.exitCode === null && child.signalCode === null) {
@@ -162,7 +177,7 @@ export function execute(
   cwd: string,
   deadline: number,
   onChild: (child: ChildProcess | null) => void,
-  options?: { env?: NodeJS.ProcessEnv },
+  options?: { env?: NodeJS.ProcessEnv; cgroup?: CgroupLimits },
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
     let requestDir: string | undefined;
@@ -201,13 +216,20 @@ export function execute(
         requestPath,
       ];
     }
+    const group = options?.cgroup ? createLinuxCgroup(options.cgroup) : null;
+    if (group) {
+      arguments_ = cgroupShellArgs(executable, arguments_);
+      executable = "/bin/sh";
+    }
     const child = spawn(executable, arguments_, {
       cwd,
       windowsHide: true,
       detached: process.platform !== "win32",
-      env: options?.env ?? process.env,
+      env: group ? { ...(options?.env ?? process.env), AIWORK_CGROUP_PATH: group.path }
+        : options?.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (group) linuxManaged.set(child, group);
     if (requestDir)
       managed.set(child, {
         stopPath: join(requestDir, "stop"),
@@ -245,6 +267,19 @@ export function execute(
           error = new UnconfirmedStop(
             "Process containment stop proof is missing",
           );
+        }
+      }
+      if (group) {
+        try {
+          if (group.populated()) {
+            group.kill();
+            throw new UnconfirmedStop("Child exited but its cgroup still had descendants");
+          }
+          group.cleanup();
+          linuxManaged.delete(child);
+        } catch (containmentError) {
+          error = containmentError instanceof UnconfirmedStop ? containmentError :
+            new UnconfirmedStop("Linux cgroup cleanup not confirmed: " + containmentError);
         }
       }
       if (!(error instanceof UnconfirmedStop)) {
@@ -347,7 +382,7 @@ export async function runAgent(
     job.workspace,
     job.deadline,
     onChild,
-    { env: job.env },
+    { env: job.env, cgroup: job.cgroup },
   );
   writeFileSync(join(job.outputDir, `${key}.events.jsonl`), result.stdout);
   writeFileSync(join(job.outputDir, `${key}.stderr.txt`), result.stderr);
