@@ -32,6 +32,8 @@ test("published MCP server restricts tools by exact allowlist; write tools fail 
     const config = renderMcpConfig(r);
     assert.match(config, /enabled_tools = \["search"\]/);
     assert.doesNotMatch(config, /delete/);
+    assert.match(config, /project_root_markers = \[\]/);
+    assert.match(config, /allow_login_shell = false/);
     assert.doesNotMatch(config, /disabled_tools/);
     registry.revoke(server.id);
     assert.throws(() => registry.resolve([{server:"docs",actions:["read"]}],null), /未发布/);
