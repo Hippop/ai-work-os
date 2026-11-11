@@ -9,7 +9,7 @@ const version = z.string().regex(/^\d+\.\d+\.\d+$/);
 const shape = z.record(z.string(), z.unknown());
 export const ExecutionProfileInput = z.object({
   name: key, version,
-  executor: z.enum(["agent", "program", "manual", "builtin"]),
+  executor: z.enum(["agent", "program", "project-test", "manual", "builtin"]),
   agent: z.string().max(80).optional(),
   model: z.string().max(150).optional(),
   skillIds: z.array(z.string().uuid()).max(20).default([]),
