@@ -55,7 +55,9 @@ test("task-authored graph must retain exact required node keys and direct edges"
     const engine = new AdaptiveEngine(store), plan = standardAdaptivePlan(task);
     assert.doesNotThrow(()=>engine.validate(plan,null,task.id));
     const changed = structuredClone(plan);
-    changed.nodes.find((n)=>n.id==="deliver")!.dependsOn=["test"];
-    assert.throws(()=>engine.validate(changed,null,task.id),/用户指定的图节点或直接依赖|质量/);
+    // Keep a valid single-terminal DAG, but break the required direct analyze -> design edge.
+    changed.nodes.find((n)=>n.id==="design")!.dependsOn=[];
+    changed.nodes.find((n)=>n.id==="implement")!.dependsOn=["design","analyze"];
+    assert.throws(()=>engine.validate(changed,null,task.id),/用户指定的图节点或直接依赖/);
   } finally { store.close(); }
 });
