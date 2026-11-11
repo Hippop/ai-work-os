@@ -459,6 +459,8 @@ export function createApp(
   app.get("/api/v2/capabilities", (_req, res) => res.json(adaptiveAssets.listCapabilities()));
   app.post("/api/v2/capabilities", (req, res) =>
     res.status(201).json(adaptiveAssets.createCapability(req.body)));
+  app.post("/api/v2/capabilities/:id/candidate", (req, res) =>
+    res.json(adaptiveAssets.updateCandidate(req.params.id, req.body)));
   app.post("/api/v2/capabilities/:id/validate", (req, res) =>
     res.json(adaptiveAssets.validateCapability(req.params.id, z.object({ evidence: z.string() }).parse(req.body).evidence)));
   app.post("/api/v2/capabilities/:id/publish", (req, res) => res.json(adaptiveAssets.publishCapability(req.params.id)));
