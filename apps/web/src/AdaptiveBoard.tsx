@@ -41,6 +41,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [skillId, setSkillId] = useState("");
   const [skillProjectId, setSkillProjectId] = useState("");
   const [plan, setPlan] = useState(json(initialPlan));
+  const [budgetUsd, setBudgetUsd] = useState("");
+  const [costInfo, setCostInfo] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [notice, setNotice] = useState("");
   const [analytics, setAnalytics] = useState<any>(null);
@@ -59,7 +61,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
     if (!selectedRun) return;
     const get = () => Promise.all([
       api("/v2/adaptive-runs"), api("/v2/adaptive-runs/" + selectedRun + "/events"),
-    ]).then(([r,e]) => { setRuns(r); setEvents(e); }).catch(() => {});
+      api("/v2/adaptive-runs/" + selectedRun + "/costs"),
+    ]).then(([r,e,c]) => { setRuns(r); setEvents(e); setCostInfo(c); }).catch(() => {});
     void get();
     const timer = setInterval(() => { void get(); }, 3500);
     return () => clearInterval(timer);
@@ -198,6 +201,9 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         workspaceSubdir: f.get("workspaceSubdir") || ".",
         memoryLimitMb: Number(f.get("memoryLimitMb") || 2048),
         maxProcesses: Number(f.get("maxProcesses") || 128),
+        maxCostUsd: Number(f.get("maxCostUsd") || 2),
+        billing: String(f.get("billing") || "").trim()
+          ? JSON.parse(String(f.get("billing"))) : undefined,
         skillIds: f.getAll("skillIds"),
         program: f.get("executor") === "program" ? {
           executable: f.get("executable"), args: JSON.parse(String(f.get("args") || "[]")),
@@ -233,6 +239,12 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           </label>
         </div>
         <p>仅在部署者设置 AI_WORK_OS_CGROUP_PARENT 指向可写的 cgroup v2 子树时生效；严格要求可设置 AI_WORK_OS_REQUIRE_CGROUP=1。</p>
+        <label>单次能力调用预留费用上限（美元）
+          <input name="maxCostUsd" type="number" min="0" max="100" step="0.01" defaultValue="2" />
+        </label>
+        <label>模型费用预留配置（可选 JSON；仅预留+事后计费，不保证单次硬上限）
+          <textarea rows={4} name="billing" placeholder='{"inputUsdPerMillion":2,"outputUsdPerMillion":8,"reservedInputTokens":100000,"reservedOutputTokens":10000}' />
+        </label>
         <label>配置所属项目
           <select name="projectId"><option value="">全局</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -446,6 +458,10 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
     </div>
     <div className="panel">
       <h2>智能编排与动态工作流</h2>
+      <label>本次执行的模型费用总预算（USD，可选；设置后要求使用的 Agent 配置含定价信息）
+        <input type="number" step="0.01" min="0.01" max="1000" value={budgetUsd}
+          placeholder="不限制（费用未知时请慎用）" onChange={(e)=>setBudgetUsd(e.target.value)} />
+      </label>
       <label>选择任务
         <select value={taskId} onChange={(e)=>setTaskId(e.target.value)}>
           <option value="">请选择任务</option>
@@ -475,7 +491,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           setPlan(json(result.plan)); setNotice("工作流通过校验（尚未执行）");
         })}>验证 DAG / 依赖 / 授权</button>
         <button disabled={!taskId} onClick={() => void act(async () => {
-          const result = await api("/v2/adaptive-runs", { taskId, plan: JSON.parse(plan) });
+          const result = await api("/v2/adaptive-runs", { taskId, plan: JSON.parse(plan),
+            budgetUsd: budgetUsd.trim() ? Number(budgetUsd) : null });
           setSelectedRun(result.id); setNotice("已创建自适应运行：" + result.id); await load();
         })}>确认并下发执行</button>
       </div>
@@ -519,6 +536,27 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       </label>
       {current && <>
         <p>状态：<strong>{current.status}</strong> · 计划版本：{current.planRevision}</p>
+        {costInfo && <details>
+          <summary>模型费用账本（已知用量与预算预留）</summary>
+          <p>运行预算：{costInfo.runBudgetUsd ?? "未配置"} USD · 已记录费用：
+            {(costInfo.spentMicroUsd/1e6).toFixed(6)} USD · 预留：
+            {(costInfo.reservedMicroUsd/1e6).toFixed(6)} USD · 待核对：{costInfo.unverifiedCount}</p>
+          <p>这不是供应商账单；超额/缺失用量可能在调用完成后才发现。</p>
+          {(costInfo.costs as any[]).map((record:any)=><article key={record.id} className="project">
+            <b>{record.profileRef}</b> · {record.state} ·
+            已知 {(record.actualMicroUsd??0)/1e6} USD · 预留 {record.reservedMicroUsd/1e6} USD
+            {record.state==="unverified"&&<button className="quiet" onClick={()=>{
+              const input=window.prompt("请填写经过供应商数据核对的 input tokens");
+              const output=window.prompt("请填写经过供应商数据核对的 output tokens");
+              if(input===null||output===null||!/^\d+$/.test(input)||!/^\d+$/.test(output))return;
+              void act(async()=>{
+                await api("/v2/adaptive-runs/"+current.id+"/costs/"+record.id+"/reconcile",
+                  {inputTokens:Number(input),outputTokens:Number(output)});
+                setCostInfo(await api("/v2/adaptive-runs/"+current.id+"/costs"));
+              });
+            }}>人工核对真实 token 用量</button>}
+          </article>)}
+        </details>}
         {current.plan.nodes.map((n)=><article className="project" key={n.id}>
           <b>{n.id}</b> · {n.capabilityRef} · {current.nodeStates[n.id] ?? "pending"}
           <small> · 依赖：{n.dependsOn.join(", ") || "无"}</small>
