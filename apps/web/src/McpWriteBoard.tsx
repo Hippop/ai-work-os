@@ -104,7 +104,7 @@ export function McpWriteBoard({api,act,projects,servers}:{
         if(!window.confirm("将向外部 MCP 发送一次已批准的写操作。是否执行？"))return;
         void act(async()=>{await api("/v2/mcp-write-intents/"+intent.id+"/execute",{});await refresh();});
       }}>执行已批准的写操作（仅一次）</button>}
-      {["uncertain","executing"].includes(intent.status)&&<>
+      {intent.status==="uncertain"&&<>
         {intent.error&&<p>异常：{intent.error}</p>}
         <button className="quiet" onClick={()=>{
           const note=window.prompt("请先在外部系统核实写入是否实际生效，并填写至少 20 字的证据。此操作不会重新调用远程工具。");
