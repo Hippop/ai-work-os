@@ -3,7 +3,8 @@ import type { Task, Project } from "../../../packages/domain/index";
 type API = (path: string, data?: unknown, headers?: Record<string, string>) => Promise<any>;
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
-type Profile = Item & { executor: string };
+type Profile = Item & { executor: string; projectId?: string | null; mcpGrants?: {server:string;actions:string[]}[] };
+type McpServer = { id: string; name: string; description: string; status: string; exposedTools: string[]; readOnlyTools: string[] };
 type Source = { id: string; path: string; lastScannedAt: string | null };
 type Skill = { id: string; name: string; relativePath: string; status: string; description: string; contentDigest: string };
 type Flow = { nodes: { id: string; capabilityRef: string; profileRef?: string; dependsOn: string[]; inputs: Record<string,unknown>; bindings?: Record<string,unknown> }[]; observations: { id: string; afterNode: string; on: string[]; barrier: boolean; question: string }[]; rationale?: string };
@@ -27,6 +28,7 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
 }) {
   const [caps, setCaps] = useState<Item[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -42,11 +44,11 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
   async function load() {
-    const [c,p,k,s,sk,r] = await Promise.all([
+    const [c,p,k,s,sk,r,mcp] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
-      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"),
+      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"),
     ]);
-    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r);
+    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp);
   }
   useEffect(() => { void act(load); }, []);
   useEffect(() => {
@@ -121,11 +123,61 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
       <p>生成的能力默认为 candidate。AI 推断不是契约验证，发布前必须绑定授权配置、核查输入输出和运行验证。辅助脚本不会自动取得执行权限。</p>
     </div>
     <div className="panel">
+      <h2>MCP Server · 受控服务器目录</h2>
+      <p>注册本机可信 MCP 服务或 HTTPS MCP 端点，只发布经人工确认的只读工具。Profile 可逐项选择服务器与工具；单次运行使用独立 Codex 配置，不继承用户全局 MCP。</p>
+      <form onSubmit={(e) => doForm(e, async (f) => {
+        const transport = String(f.get("transport"));
+        return api("/v2/mcp-servers", {
+          name: f.get("name"), description: f.get("description"),
+          projectId: f.get("projectId") || null,
+          transport: transport === "stdio"
+            ? { type: "stdio", executable: f.get("executable"), args: JSON.parse(String(f.get("args") || "[]")) }
+            : { type: "http", url: f.get("url") },
+          exposedTools: String(f.get("exposedTools")).split(",").map((t) => t.trim()).filter(Boolean),
+          readOnlyTools: String(f.get("readOnlyTools")).split(",").map((t) => t.trim()).filter(Boolean),
+        });
+      })}>
+        <div className="form-row">
+          <label>Server ID<input name="name" placeholder="code-search" required /></label>
+          <label>描述<input name="description" required /></label>
+        </div>
+        <label>项目范围
+          <select name="projectId"><option value="">全局可引用</option>
+            {projects.map((p) => <option value={p.id} key={p.id}>{p.name}</option>)}
+          </select>
+        </label>
+        <label>传输方式
+          <select name="transport" defaultValue="stdio">
+            <option value="stdio">stdio（填写可执行路径）</option>
+            <option value="http">HTTPS（填写服务 URL）</option>
+          </select>
+        </label>
+        <label>stdio 可执行程序绝对路径<input name="executable" placeholder="/usr/local/bin/mcp-server" /></label>
+        <label>stdio 参数 JSON<input name="args" defaultValue="[]" /></label>
+        <label>HTTPS MCP URL<input name="url" placeholder="https://example.com/mcp" /></label>
+        <label>Server 暴露工具（逗号分隔）<input name="exposedTools" placeholder="search,read" required /></label>
+        <label>经确认的只读工具（逗号分隔）<input name="readOnlyTools" placeholder="search,read" required /></label>
+        <button>注册 MCP Server 草稿</button>
+      </form>
+      {mcpServers.map((m) => <div className="project" key={m.id}>
+        <b>{m.name}</b> · {m.status} · 工具 {m.exposedTools.join(", ")}
+        <p>{m.description}</p>
+        {m.status === "draft" && <button className="quiet" onClick={() => void act(async () => {
+          await api("/v2/mcp-servers/" + m.id + "/publish", {}); await load();
+        })}>发布只读工具授权</button>}
+        {m.status === "published" && <button className="quiet" onClick={() => void act(async () => {
+          await api("/v2/mcp-servers/" + m.id + "/revoke", {}); await load();
+        })}>撤销 MCP</button>}
+      </div>)}
+    </div>
+    <div className="panel">
       <h2>Execution Profile · 执行配置</h2>
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/profiles", {
         name: f.get("name"), version: f.get("version"), executor: f.get("executor"),
         agent: f.get("executor") === "agent" ? "codex" : undefined,
         model: f.get("model") || undefined,
+        projectId: f.get("projectId") || null,
+        mcpGrants: JSON.parse(String(f.get("mcpGrants") || "[]")),
         workspaceMode: f.get("workspaceMode"),
         skillIds: f.getAll("skillIds"),
         program: f.get("executor") === "program" ? {
@@ -150,6 +202,14 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
           </label>
         </div>
         {profileExecutor === "agent" && <label>模型（可留空使用默认）<input name="model" /></label>}
+        <label>配置所属项目
+          <select name="projectId"><option value="">全局</option>
+            {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </label>
+        <label>MCP 工具授权 JSON（只允许以下已发布工具）
+          <textarea name="mcpGrants" rows={3} defaultValue="[]" placeholder='[{"server":"code-search","actions":["search"]}]' />
+        </label>
         {profileExecutor === "program" && <>
           <label>项目预授权命令路径<input name="executable" required /></label>
           <label>命令参数 JSON<input name="args" defaultValue="[]" required /></label>
