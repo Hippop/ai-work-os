@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
@@ -90,5 +90,27 @@ test("scan rejects missing roots, skips malformed skills, and HTTP API requires 
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Linux scan does not follow symbolic links outside authorized root", { skip: process.platform !== "linux" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "aiwork-linux-skills-"));
+  const other = mkdtempSync(join(tmpdir(), "aiwork-external-symlink-"));
+  const store = new Store(":memory:");
+  try {
+    const inside = join(root, "review");
+    mkdirSync(inside);
+    writeFileSync(join(inside, "SKILL.md"), markdown("review", "Check code"));
+    writeFileSync(join(other, "SKILL.md"), markdown("outside", "Private helper"));
+    symlinkSync(other, join(root, "outside"));
+    const links = new ExternalSkillService(store);
+    const result = links.register({ path: root });
+    assert.equal(result.found, 1);
+    assert.ok(result.warnings.some((warning) => warning.includes("符号链接")));
+    assert.deepEqual(links.skills().map((skill) => skill.name), ["review"]);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
   }
 });
