@@ -512,6 +512,20 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
             await load();
           })}>人工确认继续</button>}
         </article>)}
+        {["done","awaiting_acceptance"].includes(current.status) && (
+          <button className="quiet" onClick={() => {
+            const name = window.prompt("提取成项目知识候选，填写新知识 ID", "experience." + current.id.slice(0,8));
+            if (!name) return;
+            const version = window.prompt("版本号", "1.0.0");
+            if (!version) return;
+            void act(async () => {
+              const candidate = await api("/v2/adaptive-runs/"+current.id+"/extract-knowledge",
+                { name, version });
+              setNotice("已生成待人工审阅的项目知识草稿：" + candidate.id);
+              await load();
+            });
+          }}>从本次执行提取知识候选</button>
+        )}
         {current.status === "awaiting_acceptance" && <div className="actions">
           <button onClick={() => void act(async () => {
             await api("/v2/adaptive-runs/"+current.id+"/accept", { accepted: true, reason: "Accepted by user" }); await load();
