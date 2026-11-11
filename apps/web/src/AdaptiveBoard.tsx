@@ -46,15 +46,18 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [events, setEvents] = useState<any[]>([]);
   const [notice, setNotice] = useState("");
   const [analytics, setAnalytics] = useState<any>(null);
+  const [evalDatasets, setEvalDatasets] = useState<any[]>([]);
+  const [evalResults, setEvalResults] = useState<any[]>([]);
   const [knowledgeScope, setKnowledgeScope] = useState("global");
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
   async function load() {
-    const [c,p,k,s,sk,r,mcp,stats,bind] = await Promise.all([
+    const [c,p,k,s,sk,r,mcp,stats,bind,datasets,evaluations] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
       api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"), api("/v2/analytics"), api("/v2/knowledge-bindings"),
+      api("/v2/evaluations/datasets"),api("/v2/evaluations"),
     ]);
-    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats); setBindings(bind);
+    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats); setBindings(bind); setEvalDatasets(datasets); setEvalResults(evaluations);
   }
   useEffect(() => { void act(load); }, []);
   useEffect(() => {
@@ -505,6 +508,70 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         })}>确认并下发执行</button>
       </div>
       <p>观察点默认阻塞受影响后继节点；失败事件同样可触发评估。运行中的结果不能由编排 Agent 原地覆盖。当前按需调用仍以单机 Linux 为优先目标。</p>
+    </div>
+    <div className="panel">
+      <h2>能力版本离线对照评估</h2>
+      <p>以真实已交付 Run 的输入/输出摘要为证据，对照冻结样例比较两个已发布的只读能力版本。不触发 Agent 执行，不会自动发布或切换能力版本。</p>
+      <form onSubmit={(event)=>doForm(event,async (f)=>api("/v2/evaluations/datasets",{
+        title:String(f.get("title")),
+        capabilityName:String(f.get("capabilityName")),
+        projectId:f.get("projectId")||null,
+        cases:JSON.parse(String(f.get("cases"))),
+      }))}>
+        <h3>创建不可变验收样例集</h3>
+        <div className="form-row">
+          <label>数据集标题<input name="title" required placeholder="Search skill regression v1"/></label>
+          <label>能力名称<select name="capabilityName" required>
+            <option value="">选择已发布能力名称</option>
+            {[...new Set(caps.filter((c)=>c.status==="published").map((c)=>c.name))].map((name)=>
+              <option key={name} value={name}>{name}</option>)}
+          </select></label>
+        </div>
+        <label>所属项目<select name="projectId"><option value="">全局任务</option>
+          {projects.map((p)=><option key={p.id} value={p.id}>{p.name}</option>)}
+        </select></label>
+        <label>冻结样例 JSON（每项包含 id、input、assertions）
+          <textarea name="cases" rows={6} required
+            defaultValue={JSON.stringify([{id:"case1",input:{objective:"Inspect a service"},
+              assertions:[{field:"summary",equals:"No unresolved issues"}]}],null,2)}/>
+        </label>
+        <button>创建评估数据集</button>
+      </form>
+      <h3>执行历史的成对回放评估</h3>
+      <form onSubmit={(event)=>doForm(event,async (f)=>api("/v2/evaluations",{
+        datasetId:f.get("datasetId"),
+        baselineRef:f.get("baselineRef"),
+        candidateRef:f.get("candidateRef"),
+        pairs:JSON.parse(String(f.get("pairs"))),
+      }))}>
+        <label>冻结数据集<select name="datasetId" required>
+          <option value="">请选择</option>
+          {evalDatasets.map((d)=><option key={d.id} value={d.id}>{d.title} · {d.capabilityName}</option>)}
+        </select></label>
+        <div className="form-row">
+          <label>旧版引用<select name="baselineRef" required>
+            <option value="">请选择</option>
+            {caps.filter((c)=>c.status==="published").map((c)=><option key={c.id} value={c.id}>{c.id}</option>)}
+          </select></label>
+          <label>候选新版引用<select name="candidateRef" required>
+            <option value="">请选择</option>
+            {caps.filter((c)=>c.status==="published").map((c)=><option key={c.id} value={c.id}>{c.id}</option>)}
+          </select></label>
+        </div>
+        <label>每项样例的两次已交付运行证据 JSON
+          <textarea name="pairs" rows={6} required
+            placeholder='[{"caseId":"case1","baselineRunId":"uuid","baselineNodeId":"analyze","candidateRunId":"uuid","candidateNodeId":"analyze"}]'/>
+        </label>
+        <p>输入摘要必须与样例完全匹配。评估只读取历史运行记录，不会生成新运行或批准生产发布。</p>
+        <button>核对输入/输出并生成回归报告</button>
+      </form>
+      <h3>已保存的评估结论</h3>
+      {evalResults.map((result)=><article className="project" key={result.id}>
+        <b>{result.baselineRef}</b> → <b>{result.candidateRef}</b> · {result.verdict}
+        <p>回归案例：{result.regressions.length} · 改善案例：{result.improvements.length} ·
+          数据集摘要：<code>{result.datasetDigest.slice(0,16)}</code></p>
+        <details><summary>逐案例对照与引用摘要</summary><pre>{json(result.cases)}</pre></details>
+      </article>)}
     </div>
     <div className="panel">
       <h2>运行监控与优化候选</h2>
