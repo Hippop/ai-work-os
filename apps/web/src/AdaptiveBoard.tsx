@@ -3,6 +3,7 @@ import type { Task, Project } from "../../../packages/domain/index";
 type API = (path: string, data?: unknown, headers?: Record<string, string>) => Promise<any>;
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
+type Binding = {id:string;capabilityName:string;knowledgeRef:string;mode:string;status?:string};
 type Profile = Item & { executor: string; projectId?: string | null; mcpGrants?: {server:string;actions:string[]}[] };
 type McpServer = { id: string; name: string; description: string; status: string; exposedTools: string[]; readOnlyTools: string[] };
 type Source = { id: string; path: string; lastScannedAt: string | null };
@@ -30,6 +31,7 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
+  const [bindings, setBindings] = useState<Binding[]>([]);
   const [sources, setSources] = useState<Source[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -45,11 +47,11 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
   async function load() {
-    const [c,p,k,s,sk,r,mcp,stats] = await Promise.all([
+    const [c,p,k,s,sk,r,mcp,stats,bind] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
-      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"), api("/v2/analytics"),
+      api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"), api("/v2/analytics"), api("/v2/knowledge-bindings"),
     ]);
-    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats);
+    setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats); setBindings(bind);
   }
   useEffect(() => { void act(load); }, []);
   useEffect(() => {
@@ -364,12 +366,35 @@ export function AdaptiveBoard({ api, act, tasks, projects }: {
         <h3>{k.title} <small>{k.id}</small></h3>
         <p>{k.scope} · {k.status} · 来源：{k.source}</p>
         <details><summary>查看知识</summary><pre>{k.content}</pre></details>
+        {k.status === "draft" && <button className="quiet" onClick={() => {
+          const revised = window.prompt("修改知识草稿（Markdown 正文）", k.content);
+          if (revised === null || !revised.trim()) return;
+          void act(async () => {
+            await api("/v2/knowledge/" + encodeURIComponent(k.id) + "/draft", { content: revised });
+            await load();
+          });
+        }}>编辑草稿</button>}
+        {k.status === "published" && <button className="quiet" onClick={() => {
+          const version = window.prompt("新版本号（例如 1.0.1）");
+          if (!version) return;
+          void act(async () => {
+            await api("/v2/knowledge/" + encodeURIComponent(k.id) + "/revise", { version });
+            setNotice("已建立新版本草稿，旧发布版本保持不变"); await load();
+          });
+        }}>创建新版本草稿</button>}
         {k.status === "draft" && <button className="quiet" onClick={() => void act(async () => {
           await api("/v2/knowledge/" + encodeURIComponent(k.id) + "/publish", {}); await load();
         })}>发布知识</button>}
         {k.status === "published" && <button className="quiet" onClick={() => void act(async () => {
           await api("/v2/knowledge/" + encodeURIComponent(k.id) + "/revoke", {}); await load();
         })}>撤销知识</button>}
+      </article>)}
+      <h3>现有知识绑定</h3>
+      {bindings.filter((b)=>b.status!=="revoked").map((b)=><article className="project" key={b.id}>
+        <b>{b.capabilityName}</b> → {b.knowledgeRef} · {b.mode}
+        <button className="quiet" onClick={() => void act(async () => {
+          await api("/v2/knowledge-bindings/"+encodeURIComponent(b.id)+"/revoke",{}); await load();
+        })}>解除绑定</button>
       </article>)}
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/knowledge-bindings", {
         capabilityName: f.get("capabilityName"), knowledgeRef: f.get("knowledgeRef"), mode: f.get("mode"),
