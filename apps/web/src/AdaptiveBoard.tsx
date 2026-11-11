@@ -9,7 +9,7 @@ type McpServer = { id: string; name: string; description: string; status: string
 type Source = { id: string; path: string; lastScannedAt: string | null };
 type Skill = { id: string; name: string; relativePath: string; status: string; description: string; contentDigest: string };
 type Flow = { nodes: { id: string; capabilityRef: string; profileRef?: string; dependsOn: string[]; inputs: Record<string,unknown>; bindings?: Record<string,unknown> }[]; observations: { id: string; afterNode: string; on: string[]; barrier: boolean; question: string }[]; rationale?: string };
-type Run = { id: string; taskId: string; status: string; planRevision: number; plan: Flow; nodeStates: Record<string,string>; observationStates: Record<string,string>; failures: Record<string,string>; results: Record<string,unknown> };
+type Run = { id: string; taskId: string; status: string; planRevision: number; plan: Flow; nodeStates: Record<string,string>; observationStates: Record<string,string>; decisions: Record<string,{decision:string;reason:string}>; failures: Record<string,string>; results: Record<string,unknown> };
 const json = (x: unknown) => JSON.stringify(x, null, 2);
 const defaultInput = {
   type: "object", properties: { objective: { type: "string" } }, required: ["objective"], additionalProperties: false,
@@ -526,6 +526,20 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
               await downloadArtifact(current.id,n.id,artifact);
             })}>下载 {artifact.split("/").pop()}</button>
           ))}
+          {current.nodeStates[n.id] === "uncertain" &&
+            <button onClick={() => {
+              const note = window.prompt("确认相关进程已终止、Worktree 和外部副作用已逐项核对。输入至少 10 字的依据（无法确认请取消）");
+              if (!note || note.trim().length < 10) return;
+              void act(async () => {
+                await api("/v2/adaptive-runs/"+current.id+"/reconcile/"+n.id,
+                  {stoppedConfirmed:true,note}); await load();
+              });
+            }}>人工核对该未确认调用</button>}
+          {current.nodeStates[n.id] === "failed" &&
+            current.status === "waiting" && 
+            <button className="quiet" onClick={() => void act(async () => {
+              await api("/v2/adaptive-runs/"+current.id+"/retry",{nodeId:n.id}); await load();
+            })}>请求安全重试（写入能力将被拒绝）</button>}
           {current.nodeStates[n.id] === "waiting" &&
             <button onClick={() => {
               const v = window.prompt("填写符合该能力输出 Schema 的 JSON");
@@ -537,7 +551,16 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         {current.plan.observations.map((o)=><article className="project" key={o.id}>
           <b>{o.id}</b> · {current.observationStates[o.id] ?? "未触发"}
           <p>{o.question}</p>
-          {current.observationStates[o.id] === "waiting" && <button onClick={() => void act(async () => {
+          {current.status === "waiting" &&
+            current.decisions[o.id]?.decision === "REPLAN" &&
+            <button onClick={() => void act(async () => {
+              await api("/v2/adaptive-runs/"+current.id+"/observations/"+o.id+"/replan",{});
+              await load();
+            })}>重试经校验的重规划</button>}
+          {(current.observationStates[o.id] === "waiting" ||
+            (current.status==="waiting" &&
+              ["WAIT_INPUT","WAIT_APPROVAL"].includes(current.decisions[o.id]?.decision))) &&
+            <button onClick={() => void act(async () => {
             await api("/v2/adaptive-runs/"+current.id+"/observations/"+o.id+"/decision",
               { decision: "CONTINUE", reason: "User manually reviewed the evidence", affectedNodeIds: [], evidenceRefs: [] });
             await load();
