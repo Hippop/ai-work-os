@@ -509,6 +509,12 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           <p>重规划：<b>{analytics.replans}</b></p>
         </div>
         <details><summary>运行状态与事件统计</summary><pre>{json({runs:analytics.runStatuses,events:analytics.events})}</pre></details>
+        {analytics.modelCosts && <p>已估算模型费用：
+          {Number(analytics.modelCosts.settledUsd).toFixed(6)} USD ·
+          进行中预留 {Number(analytics.modelCosts.pendingReserveUsd).toFixed(6)} USD ·
+          未核对 {analytics.modelCosts.unverified} 次 ·
+          超预留 {analytics.modelCosts.overruns} 次
+        </p>}
         <h3>能力执行指标</h3>
         {analytics.invocations.map((c: any) => (
           <article className="project" key={c.capabilityRef}>
