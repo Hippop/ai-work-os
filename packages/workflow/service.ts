@@ -213,6 +213,7 @@ export class WorkService {
         taskId: task.id,
         runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
       },
+      task.externalSkillIds,
     );
     if (context.canaryBindings.length)
       checks.push({
@@ -434,7 +435,7 @@ export class WorkService {
         if (action === "resume" && run.status === "paused") {
           const frozenTask = run.manifest.task as Task;
           const frozenContext = run.manifest.context as {
-            skills: { id: string }[];
+            skills: { id: string; external?: { sourceId: string } }[];
             knowledge: { id: string }[];
             workflow: { id: string } | null;
             canaryBindings?: {
@@ -483,7 +484,7 @@ export class WorkService {
                   })
                   .map((binding) => binding.candidateId),
           ).context(
-            frozenContext.skills.map((r) => r.id),
+            frozenContext.skills.filter((r) => !r.external).map((r) => r.id),
             frozenContext.knowledge.map((r) => r.id),
             frozenContext.workflow?.id ?? null,
             frozenTask.projectId,
