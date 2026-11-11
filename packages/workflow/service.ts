@@ -218,6 +218,7 @@ export class WorkService {
         runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
       },
       task.flowRequirements,
+      task.externalSkillIds,
     );
     if (context.canaryBindings.length)
       checks.push({
