@@ -1,3 +1,4 @@
+import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
 import { AssetService } from "../../packages/adaptive/assets.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
@@ -508,6 +509,11 @@ export function createApp(
     const b = z.object({ projectId: z.string().uuid().nullable().default(null),
       taskId: z.string().uuid().optional(), plan: z.unknown() }).parse(req.body);
     res.json({ plan: adaptive.validate(b.plan, b.projectId, b.taskId) });
+  });
+  app.post("/api/v2/tasks/:id/standard-plan", (req, res) => {
+    const task = service.required<Task>("task", req.params.id);
+    const plan = standardAdaptivePlan(task);
+    res.json({ plan: adaptive.validate(plan, task.projectId, task.id), source: "deterministic-template" });
   });
   app.post("/api/v2/tasks/:id/compose", async (req, res) =>
     res.json({ plan: await adaptive.compose(req.params.id) }));
