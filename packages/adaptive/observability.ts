@@ -1,6 +1,7 @@
 import { Store } from "../persistence/index.js";
 import { z } from "zod";
 import type { AdaptiveRun } from "./engine.js";
+import type { CostRecord } from "./budget.js";
 
 const filterInput = z.object({
   days: z.number().int().min(1).max(365).default(30),
@@ -23,6 +24,8 @@ export class AdaptiveObservability {
     const since = new Date(Date.now() - days * 86400000).toISOString();
     const runs = this.store.list<AdaptiveRun>("adaptive_run").filter((run) => run.createdAt >= since);
     const runIds = new Set(runs.map((run) => run.id));
+    const costRecords = this.store.list<CostRecord>("adaptive_cost")
+      .filter((c) => runIds.has(c.runId));
     const invocations = this.store.list<Invocation>("adaptive_invocation")
       .filter((inv) => runIds.has(inv.runId) && inv.startedAt >= since)
       .slice(0, limit);
@@ -79,9 +82,19 @@ export class AdaptiveObservability {
         blocked:eventCounts["adaptive.observation.blocked"]??0},
       replans:eventCounts["adaptive.plan.revised"]??0,
       knowledgeRetrievals: this.countKnowledgeEvents(since,limit),
+      modelCosts: {
+        pricedCalls:costRecords.length,
+        settledUsd:costRecords.filter((c)=>["settled","overrun"].includes(c.state))
+          .reduce((sum,c)=>sum+(c.actualMicroUsd??0),0)/1_000_000,
+        pendingReserveUsd:costRecords.filter((c)=>c.state==="reserved")
+          .reduce((sum,c)=>sum+c.reservedMicroUsd,0)/1_000_000,
+        unverified:costRecords.filter((c)=>c.state==="unverified").length,
+        overruns:costRecords.filter((c)=>c.state==="overrun").length,
+      },
       recommendations,
       limitations:[
         "Token usage is included only when the underlying executor provided usage data",
+        "USD totals are profile-configured estimates, not provider invoices or hard spending caps",
         "Counts cover retained local SQLite records only; no external telemetry is inferred",
         "Recommendations require review and never alter capability versions automatically",
       ],
