@@ -37,6 +37,21 @@ export class AdaptiveRuntime {
     else for (const item of this.children) if (item.exitCode !== null || item.signalCode !== null) this.children.delete(item);
   };
   private command() { return executablePath(this.codex); }
+  private containment(profile?: { memoryLimitMb: number; maxProcesses: number }) {
+    const parent = process.env.AI_WORK_OS_CGROUP_PARENT;
+    if (!parent) {
+      if (process.env.AI_WORK_OS_REQUIRE_CGROUP === "1")
+        throw new DomainError("cgroup_required", "当前未配置委派的 Linux cgroup v2 子树", 503);
+      return undefined;
+    }
+    if (process.platform !== "linux")
+      throw new DomainError("linux_required", "cgroup v2 隔离仅在 Linux 可用", 503);
+    return {
+      parent,
+      memoryMaxBytes:(profile?.memoryLimitMb ?? 2048) * 1024 * 1024,
+      pidsMax:profile?.maxProcesses ?? 128,
+    };
+  }
   private async json<T>(kind: string, task: Task, prompt: string, schema: unknown, parse: (value: unknown) => T): Promise<T> {
     if (this.stopped) throw new DomainError("runtime_stopping", "执行器正在关闭", 503);
     const project = task.projectId ? this.store.get<Project>("project", task.projectId) : null;
@@ -55,7 +70,7 @@ export class AdaptiveRuntime {
     const isolated = isolatedCodexHome(renderMcpConfig([]));
     try {
       const result = await execute(this.command(), args, workDir, deadline, this.child,
-        { env: isolated.env });
+        { env: isolated.env, cgroup: this.containment() });
       if (result.code !== 0) throw new Error("Codex " + kind + " failed: " + result.stderr.slice(0, 800));
       const parsed = JSON.parse(readFileSync(resultFile, "utf8")) as unknown;
       return parse(parsed);
@@ -185,7 +200,8 @@ export class AdaptiveRuntime {
         const before = workspaceDigest(workspace);
         const program = profile.executor === "project-test" ? project.testCommand! : profile.program!;
         const r = await execute(program.executable, program.args, workingDirectory,
-          Date.now() + profile.timeoutSeconds * 1000, this.child);
+          Date.now() + profile.timeoutSeconds * 1000, this.child,
+          { cgroup: this.containment(profile) });
         if (r.code !== 0) throw new Error("Program returned " + r.code + ": " + r.stderr.slice(0, 800));
         if (workspaceDigest(workspace) !== before)
           throw new DomainError("program_changed_workspace", "测试命令更改了代码工作区", 422);
@@ -210,7 +226,8 @@ export class AdaptiveRuntime {
       ].join("\n");
       const job = {
         runId: call.run.id, epoch: randomUUID(), workspace: workingDirectory, outputDir: folder,
-        command: this.command(), commandPrefix: [], objective: call.task.objective,
+        command: this.command(), commandPrefix: [], cgroup: this.containment(profile),
+        objective: call.task.objective,
         criteria: call.task.acceptanceCriteria, testCommand: project.testCommand ?? { executable:"true", args: [] },
         deadline: Date.now() + profile.timeoutSeconds * 1000, model: profile.model ?? this.model,
         context: { knowledge: call.knowledge.map((x) => ({ id:x.id, digest:x.digest })) },
