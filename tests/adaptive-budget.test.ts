@@ -42,7 +42,7 @@ test("unverified or overrunning usage blocks new model invocations without inven
   budget.reserve("run-2","uncertain",profile,1.5);
   budget.unverified("uncertain","provider_log_missing");
   assert.throws(()=>budget.reserve("run-2","next",profile,1.5),/未确认费用/);
-  const settled=budget.reconcile("uncertain",10_000,1_000,profile,1.5)!;
+  const settled=budget.reconcile("uncertain",10_000,1_000,profile,1.5,"Confirmed from provider billing statement on 2026-11-11")!;
   assert.equal(settled.state,"settled");
   budget.reserve("run-2","over",profile,1.5);
   const over=budget.settle("over",{inputTokens:250_000,outputTokens:40_000},profile,1.5)!;
