@@ -12,14 +12,24 @@ type Resource = {
 export function ResourceManager({
   api,
   act,
+  refresh,
 }: {
   api: API;
   act: (fn: () => Promise<void>) => Promise<void>;
+  refresh: () => Promise<void>;
 }) {
   const [resources, setResources] = useState<Resource[]>([]),
+    [sources, setSources] = useState<{ id: string; path: string; lastScannedAt: string | null }[]>([]),
+    [external, setExternal] = useState<{ id: string; sourceId: string; relativePath: string; name: string; description: string; status: string; contentDigest: string }[]>([]),
+    [scanNotice, setScanNotice] = useState(""),
     [plan, setPlan] = useState("[]");
   const load = async () => {
-    setResources(await api("/resources"));
+    const [versions, roots, imported] = await Promise.all([
+      api("/resources"), api("/skill-sources"), api("/external-skills"),
+    ]);
+    setResources(versions);
+    setSources(roots);
+    setExternal(imported);
   };
   useEffect(() => {
     void act(async () => {
@@ -53,6 +63,48 @@ export function ResourceManager({
   }
   return (
     <>
+      <div className="panel">
+        <h2>外部 Skill 目录（仅引用）</h2>
+        <p>输入本机绝对文件夹路径，扫描其中的 SKILL.md。这里只记录目录和元数据，不复制 Skill 文件。执行准备时读取最新内容并固定该次运行的指令快照。</p>
+        <form onSubmit={(event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const path = String(new FormData(form).get("path") ?? "").trim();
+          void act(async () => {
+            const result = await api("/skill-sources", { path });
+            setScanNotice("发现 " + result.found + " 个 Skill；" + result.missing + " 个原引用已失效。" + (result.warnings.length ? " 注意：" + result.warnings.slice(0, 5).join("；") : ""));
+            form.reset();
+            await load();
+            await refresh();
+          });
+        }}>
+          <label>Skill 来源目录绝对路径
+            <input name="path" placeholder="例如 /home/user/.agents/skills" required />
+          </label>
+          <button>注册并扫描</button>
+        </form>
+        {scanNotice && <p role="status">{scanNotice}</p>}
+        {sources.map((source) => (
+          <article className="project" key={source.id}>
+            <p><code>{source.path}</code></p>
+            <small>上次扫描：{source.lastScannedAt ?? "尚未扫描"}</small>
+            <div className="actions"><button className="quiet" onClick={() => void act(async () => {
+              const result = await api(`/skill-sources/${source.id}/scan`, {});
+              setScanNotice("发现 " + result.found + " 个 Skill；" + result.missing + " 个引用失效。" + (result.warnings.length ? " 注意：" + result.warnings.slice(0, 5).join("；") : ""));
+              await load();
+              await refresh();
+            })}>重新扫描</button></div>
+            {external.filter((item) => item.sourceId === source.id).map((skill) => (
+              <div key={skill.id}>
+                <b>{skill.name}</b> · {skill.status} · {skill.relativePath || "."}
+                <p>{skill.description}</p>
+                <small>SHA256: {skill.contentDigest}</small>
+              </div>
+            ))}
+          </article>
+        ))}
+        <p>含 scripts、references 等辅助文件的 Skill 仍保存在原目录；当前只保证 SKILL.md 指令加载，辅助文件访问取决于执行器沙箱和文件权限。</p>
+      </div>
       <div className="panel">
         <h2>创建资源版本</h2>
         <p>

@@ -9,6 +9,7 @@ import { PlanningService } from "../../packages/planning/index.js";
 import { DiagnosisService } from "../../packages/diagnosis/index.js";
 import { OptimizationService } from "../../packages/optimization/index.js";
 import { RolloutService } from "../../packages/optimization/rollout.js";
+import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { probeCodex } from "../../packages/runtime/adapter.js";
 import {
   inspectRecovery,
@@ -33,6 +34,7 @@ export function createApp(
 ) {
   const app = express();
   const resources = new ResourceService(store);
+  const externalSkills = new ExternalSkillService(store);
   const planning = new PlanningService(store),
     diagnosis = new DiagnosisService(store);
   const optimization = new OptimizationService(store, dataDir, service.runtime);
@@ -237,6 +239,14 @@ export function createApp(
   );
   app.post("/api/v1/tasks/:id/diagnosis/reports", (req, res) =>
     res.status(201).json(diagnosis.report(req.params.id, req.body)),
+  );
+  app.get("/api/v1/skill-sources", (_req, res) => res.json(externalSkills.sources()));
+  app.get("/api/v1/external-skills", (_req, res) => res.json(externalSkills.skills()));
+  app.post("/api/v1/skill-sources", (req, res) =>
+    res.status(201).json(externalSkills.register(req.body)),
+  );
+  app.post("/api/v1/skill-sources/:id/scan", (req, res) =>
+    res.json(externalSkills.scan(req.params.id)),
   );
   app.get("/api/v1/resources", (_req, res) =>
     res.json(

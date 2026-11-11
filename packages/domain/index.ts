@@ -13,6 +13,7 @@ export const TaskInput = z.object({
   priority: z.enum(["low", "normal", "high"]).default("normal"),
   maxMinutes: z.number().int().min(1).max(120).default(30),
   skillVersionIds: z.array(z.string().uuid()).max(20).default([]),
+  externalSkillIds: z.array(z.string().uuid()).max(20).default([]),
   knowledgeVersionIds: z.array(z.string().uuid()).max(30).default([]),
   workflowVersionId: z.string().uuid().nullable().default(null),
   resourceFamilyIds: z

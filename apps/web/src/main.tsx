@@ -59,6 +59,7 @@ function App() {
         current: boolean;
       }[]
     >([]);
+  const [externalSkills, setExternalSkills] = useState<{ id: string; name: string; description: string; status: string; relativePath: string }[]>([]);
   const [selected, setSelected] = useState<string>(),
     [events, setEvents] = useState<Event[]>([]),
     [busy, setBusy] = useState(false),
@@ -88,18 +89,20 @@ function App() {
     return result;
   }
   async function refresh() {
-    const [t, p, r, d, versions] = await Promise.all([
+    const [t, p, r, d, versions, external] = await Promise.all([
       api<Task[]>("/tasks"),
       api<Project[]>("/projects"),
       api<Run[]>("/runs"),
       api<Delivery[]>("/deliveries"),
       api<typeof resources>("/resources"),
+      api<typeof externalSkills>("/external-skills"),
     ]);
     setTasks(t);
     setProjects(p);
     setRuns(r);
     setDeliveries(d);
     setResources(versions);
+    setExternalSkills(external);
   }
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -158,6 +161,7 @@ function App() {
         type: form.get("type"),
         priority: form.get("priority"),
         projectId: form.get("projectId") || null,
+        externalSkillIds: form.getAll("externalSkillIds"),
         skillVersionIds: form
           .getAll("skillVersionIds")
           .filter((v) => !String(v).startsWith("active:")),
@@ -677,7 +681,7 @@ function App() {
               refresh={refresh}
             />
           )}
-          {page === "能力与知识" && <ResourceManager api={api} act={act} />}
+          {page === "能力与知识" && <ResourceManager api={api} act={act} refresh={refresh} />}
           {page === "目标与计划" && (
             <PlanningBoard
               tasks={tasks}
@@ -926,6 +930,18 @@ function App() {
                   </select>
                 </label>
               ))}
+              {externalSkills.some((s) => s.status === "available") && (
+                <label>
+                  外部 Skill 引用（可多选；启动时固定内容）
+                  <select name="externalSkillIds" multiple>
+                    {externalSkills.filter((s) => s.status === "available").map((s) => (
+                      <option key={s.id} value={s.id} title={s.description}>
+                        {s.name} · {s.relativePath || "."}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label>
                 验收条件（每行一项）
                 <textarea

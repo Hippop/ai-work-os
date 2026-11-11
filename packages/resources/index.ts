@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { Store } from "../persistence/index.js";
+import { ExternalSkillService } from "../external-skills/index.js";
 import {
   DomainError,
   digest,
@@ -340,6 +341,7 @@ export class ResourceService {
     taskType = "development",
     familyIds: string[] = [],
     rollout?: { taskId: string; runtimeConfigurationDigest?: string | null },
+    externalSkillIds: string[] = [],
   ) {
     const canaryBindings: {
       id: string;
@@ -400,7 +402,10 @@ export class ResourceService {
       ...this.candidateIds,
       ...canaryBindings.map((c) => c.candidateId),
     ]);
-    const skills = resolver.resolve(skillIds, "skill", projectId),
+    const skills = [
+        ...resolver.resolve(skillIds, "skill", projectId),
+        ...new ExternalSkillService(this.store).snapshot(externalSkillIds),
+      ],
       knowledge = resolver.resolve(knowledgeIds, "knowledge", projectId),
       template = workflowId
         ? resolver.resolve([workflowId], "workflow", projectId)[0]
