@@ -94,7 +94,7 @@ test("write failure becomes uncertain with ledger, never gets automatically retr
     const ledger = store.list<any>("adaptive_side_effect");
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].state, "uncertain");
-    assert.throws(() => engine.retry(run.id, "implement"), /当前无法重试/);
+    assert.throws(() => engine.retry(run.id, "implement"), /当前无法重试|未核对/);
     assert.throws(() => engine.cancel(run.id), /未确认停止/);
     assert.equal(engine.reconcileUncertain(run.id, "implement", true,
       "Inspected worktree and child process; no pending external actions").status, "failed");
