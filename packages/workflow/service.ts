@@ -46,6 +46,8 @@ export class WorkService {
   }
   createTask(input: unknown): Task {
     const data = TaskInput.parse(input);
+    if (data.type === "manual" && data.flowRequirements)
+      throw new DomainError("manual_flow", "人工任务不支持Agent流程配置", 422);
     if (data.projectId) this.required("project", data.projectId);
     const now = new Date().toISOString();
     const task: Task = {
@@ -108,6 +110,8 @@ export class WorkService {
           "执行期间请先暂停并结束当前运行，再修改任务",
         );
       const data = TaskInput.parse({ ...task, ...(input as object) });
+      if (data.type === "manual" && data.flowRequirements)
+        throw new DomainError("manual_flow", "人工任务不支持Agent流程配置", 422);
       if (data.projectId) this.required("project", data.projectId);
       const updated = {
         ...task,
@@ -213,6 +217,7 @@ export class WorkService {
         taskId: task.id,
         runtimeConfigurationDigest: this.runtime.configurationDigest ?? null,
       },
+      task.flowRequirements,
     );
     if (context.canaryBindings.length)
       checks.push({
@@ -251,8 +256,10 @@ export class WorkService {
       },
       project,
       baseCommit,
-      workflowVersion: context.workflow
-        ? `${context.workflow.name}@${context.workflow.version}`
+      workflowVersion: task.flowRequirements && task.flowRequirements.mode !== "standard"
+        ? `task-${task.flowRequirements.mode}@1.0.0`
+        : context.workflow
+          ? `${context.workflow.name}@${context.workflow.version}`
         : task.type === "diagnosis"
           ? "incident-diagnosis@1.0.0"
           : "feature-development@1.0.0",
