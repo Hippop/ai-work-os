@@ -162,6 +162,7 @@ export function execute(
   cwd: string,
   deadline: number,
   onChild: (child: ChildProcess | null) => void,
+  options?: { env?: NodeJS.ProcessEnv },
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
     let requestDir: string | undefined;
@@ -204,6 +205,7 @@ export function execute(
       cwd,
       windowsHide: true,
       detached: process.platform !== "win32",
+      env: options?.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (requestDir)
@@ -337,6 +339,7 @@ export async function runAgent(
     job.workspace,
     job.deadline,
     onChild,
+    { env: job.env },
   );
   writeFileSync(join(job.outputDir, `${key}.events.jsonl`), result.stdout);
   writeFileSync(join(job.outputDir, `${key}.stderr.txt`), result.stderr);
