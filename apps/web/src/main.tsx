@@ -681,7 +681,7 @@ function App() {
               refresh={refresh}
             />
           )}
-          {page === "能力与知识" && <ResourceManager api={api} act={act} />}
+          {page === "能力与知识" && <ResourceManager api={api} act={act} refresh={refresh} />}
           {page === "目标与计划" && (
             <PlanningBoard
               tasks={tasks}
