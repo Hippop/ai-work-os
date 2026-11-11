@@ -520,6 +520,14 @@ export function createApp(
     res.json(store.list<{ runId: string }>("adaptive_invocation").filter((i) => i.runId === req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/plan-revisions", (req, res) =>
     res.json(store.list<{ runId: string }>("adaptive_plan_revision").filter((i) => i.runId === req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/manual/:nodeId/complete", (req, res) => {
+    const b = z.object({ output: z.unknown() }).parse(req.body);
+    res.json(adaptive.completeManual(req.params.id, req.params.nodeId, b.output));
+  });
+  app.post("/api/v2/adaptive-runs/:id/reconcile/:nodeId", (req, res) => {
+    const b = z.object({ stoppedConfirmed: z.boolean(), note: z.string() }).parse(req.body);
+    res.json(adaptive.reconcileUncertain(req.params.id, req.params.nodeId, b.stoppedConfirmed, b.note));
+  });
   app.post("/api/v2/adaptive-runs/:id/accept", (req, res) => {
     const b = z.object({ accepted: z.boolean(), reason: z.string().default("") }).parse(req.body);
     res.json(adaptive.accept(req.params.id, b.accepted, b.reason));
