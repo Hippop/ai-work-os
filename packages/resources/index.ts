@@ -5,27 +5,14 @@ import {
   DomainError,
   digest,
   workflow,
+  FlowNodeInput,
+  FlowRequirementsInput,
+  type FlowRequirements,
   type Run,
   type Task,
 } from "../domain/index.js";
 
-export const NodeInput = z.object({
-  key: z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/),
-  operation: z.enum([
-    "analyze",
-    "design",
-    "implement",
-    "test",
-    "review",
-    "deliver",
-    "collect",
-    "hypothesize",
-    "verify",
-    "conclude",
-  ]),
-  title: z.string().min(1).max(200),
-  dependsOn: z.array(z.string()).default([]),
-});
+export const NodeInput = FlowNodeInput;
 export type PlanNode = z.infer<typeof NodeInput>;
 export const defaultPlan: PlanNode[] = workflow.map(([key, title], i) => ({
   key,
@@ -136,7 +123,69 @@ export function validatePlan(
       "最终实现后必须测试，测试后必须审查",
       422,
     );
+  // Linear execution order is not a substitute for actual DAG ancestry:
+  // every code change must precede the final test, which must precede review.
+  function precedes(earlier: PlanNode, later: PlanNode): boolean {
+    const pending = [...later.dependsOn];
+    const seen = new Set<string>();
+    while (pending.length) {
+      const key = pending.pop()!;
+      if (key === earlier.key) return true;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pending.push(...(byKey.get(key)?.dependsOn ?? []));
+    }
+    return false;
+  }
+  const last = (operation: PlanNode["operation"]) =>
+    [...ordered].reverse().find((node) => node.operation === operation)!;
+  if (taskType === "diagnosis") {
+    const stages = ["collect", "hypothesize", "verify", "conclude", "deliver"] as const;
+    for (let i = 1; i < stages.length; i++)
+      if (!precedes(last(stages[i - 1]), last(stages[i])))
+        throw new DomainError("invalid_plan", "诊断阶段必须具备真实的依赖关系", 422);
+  } else {
+    for (const operation of ["implement", "test", "review"] as const) {
+      const target = operation === "implement" ? last("test") :
+        operation === "test" ? last("review") : last("deliver");
+      if (ordered.some((node) =>
+        node.operation === operation && !precedes(node, target)))
+        throw new DomainError(
+          "invalid_plan",
+          "实现、测试、审查、交付必须形成完整的依赖链",
+          422,
+        );
+    }
+  }
   return ordered;
+}
+/** Resolve the task's declarative request into a validated DAG. */
+export function assemblePlan(
+  templatePlan: PlanNode[],
+  request: FlowRequirements | null | undefined,
+  taskType = "development",
+): PlanNode[] {
+  if (!request) return validatePlan(templatePlan, taskType);
+  const requirements = FlowRequirementsInput.parse(request);
+  if (requirements.mode === "standard")
+    return validatePlan(templatePlan, taskType);
+  if (requirements.mode === "graph")
+    return validatePlan(requirements.nodes, taskType);
+  const counts = new Map<string, number>();
+  let previous: string | null = null;
+  const composed: PlanNode[] = requirements.stages.map((stage) => {
+    const number = (counts.get(stage.operation) ?? 0) + 1;
+    counts.set(stage.operation, number);
+    const key = stage.operation + "_" + number;
+    const node: PlanNode = {
+      ...stage,
+      key,
+      dependsOn: previous ? [previous] : [],
+    };
+    previous = key;
+    return node;
+  });
+  return validatePlan(composed, taskType);
 }
 const VersionInput = z.object({
   kind: z.enum(["skill", "knowledge", "workflow"]),
@@ -340,6 +389,7 @@ export class ResourceService {
     taskType = "development",
     familyIds: string[] = [],
     rollout?: { taskId: string; runtimeConfigurationDigest?: string | null },
+    flowRequirements: FlowRequirements | null = null,
   ) {
     const canaryBindings: {
       id: string;
@@ -412,11 +462,11 @@ export class ResourceService {
       knowledge,
       workflow: template,
       canaryBindings,
-      plan: template
-        ? validatePlan(template.nodes, taskType)
-        : taskType === "diagnosis"
-          ? diagnosisPlan
-          : defaultPlan,
+      plan: assemblePlan(
+        template?.nodes ?? (taskType === "diagnosis" ? diagnosisPlan : defaultPlan),
+        flowRequirements,
+        taskType,
+      ),
     };
     const keys = [...skills, ...knowledge].map((r) => `${r.kind}:${r.name}`);
     if (new Set(keys).size !== keys.length)
