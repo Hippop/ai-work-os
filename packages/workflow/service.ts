@@ -109,6 +109,9 @@ export class WorkService {
           "active_run",
           "执行期间请先暂停并结束当前运行，再修改任务",
         );
+      if (this.store.list<{taskId:string;status:string}>("adaptive_run").some((run) =>
+        run.taskId === id && !["done","cancelled","failed"].includes(run.status)))
+        throw new DomainError("active_run", "该任务已有活跃的自适应运行，不能修改", 409);
       const data = TaskInput.parse({ ...task, ...(input as object) });
       if (data.type === "manual" && data.flowRequirements)
         throw new DomainError("manual_flow", "人工任务不支持Agent流程配置", 422);
@@ -328,6 +331,9 @@ export class WorkService {
           .some((r) => r.taskId === id && !terminal.has(r.status))
       )
         throw new DomainError("active_run", "该任务已有活跃运行");
+      if (this.store.list<{taskId:string;status:string}>("adaptive_run").some((run) =>
+        run.taskId === id && !["done","cancelled","failed"].includes(run.status)))
+        throw new DomainError("active_run", "该任务已有活跃的自适应运行，不能启动旧执行路径", 409);
       const task = this.required<Task>("task", id),
         now = new Date().toISOString();
       const run: Run = {
