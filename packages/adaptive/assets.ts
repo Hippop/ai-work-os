@@ -257,8 +257,19 @@ export class AssetService {
     if (this.store.get("adaptive_knowledge", id)) throw new DomainError("version_exists", "知识版本已存在");
     if (data.scope === "project" && (!data.projectId || !this.store.get("project", data.projectId)))
       throw new DomainError("scope_required", "项目知识必须关联已有项目", 422);
-    if (data.scope === "task" && (!data.taskId || !this.store.get("task", data.taskId)))
-      throw new DomainError("scope_required", "任务知识必须关联已有任务", 422);
+    if (data.scope === "task") {
+      const task = data.taskId
+        ? this.store.get<{projectId:string|null}>("task",data.taskId) : null;
+      if (!task)
+        throw new DomainError("scope_required", "任务知识必须关联已有任务", 422);
+      if (data.projectId !== task.projectId)
+        throw new DomainError("knowledge_task_project_mismatch",
+          "任务知识项目范围必须与任务所属项目一致", 422);
+    }
+    if (data.taskId && data.scope !== "task")
+      throw new DomainError("knowledge_scope_mismatch", "只有任务作用域知识可以指定任务 ID", 422);
+    if (data.projectId && !this.store.get("project",data.projectId))
+      throw new DomainError("knowledge_project_missing", "知识引用的项目不存在", 422);
     if (data.scope === "capability" && !data.capabilityNames.length)
       throw new DomainError("scope_required", "能力知识必须指定适用能力", 422);
     const k: Knowledge = { ...data, id, status: "draft", createdAt: new Date().toISOString() };
@@ -357,9 +368,19 @@ export class AssetService {
       (!k.capabilityNames.length || k.capabilityNames.includes(capabilityName));
   }
   retrieveKnowledge(query: string, projectId: string | null, taskId: string | null, capabilityName: string, max = 8) {
+    if (taskId) {
+      const task = this.store.get<{projectId:string|null}>("task",taskId);
+      if (!task || task.projectId !== projectId)
+        throw new DomainError("knowledge_context_scope", "任务与查询项目范围不一致", 403);
+    }
+    if (projectId && !this.store.get("project",projectId))
+      throw new DomainError("knowledge_context_scope", "查询项目不存在", 403);
     const search = query.toLowerCase().trim();
     const bindings = this.bindings(capabilityName);
     const required = bindings.filter((b) => b.mode === "required");
+    if (required.length > 20)
+      throw new DomainError("required_knowledge_over_budget",
+        "必需知识超过运行上下文上限，不允许静默丢弃",422);
     for (const b of required) {
       const k = this.getKnowledge(b.knowledgeRef);
       if (!this.accessible(k, projectId, taskId, capabilityName)) throw new DomainError("required_knowledge_missing", "必需知识不可访问或已撤销", 422);
