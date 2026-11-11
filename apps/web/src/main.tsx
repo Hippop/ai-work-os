@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { Task, Project, Run, Event } from "../../../packages/domain/index";
 import "./style.css";
 import { ResourceManager } from "./ResourceManager";
+import { AdaptiveBoard } from "./AdaptiveBoard";
 import { PlanEditor } from "./PlanEditor";
 import { PlanningBoard } from "./PlanningBoard";
 import { DiagnosisBoard } from "./DiagnosisBoard";
@@ -119,7 +120,7 @@ function App() {
     data?: unknown,
     headers: Record<string, string> = {},
   ): Promise<T> {
-    const response = await fetch(`/api/v1${path}`, {
+    const response = await fetch(path.startsWith("/v2/") ? `/api${path}` : `/api/v1${path}`, {
       method: data === undefined ? "GET" : "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -287,6 +288,7 @@ function App() {
           "优化中心",
           "项目与仓库",
           "能力与知识",
+          "自适应工作流",
           "目标与计划",
           "故障诊断",
         ].map((item, index) => (
@@ -735,6 +737,7 @@ function App() {
             />
           )}
           {page === "能力与知识" && <ResourceManager api={api} act={act} />}
+          {page === "自适应工作流" && <AdaptiveBoard api={api} act={act} tasks={tasks} projects={projects} />}
           {page === "目标与计划" && (
             <PlanningBoard
               tasks={tasks}
