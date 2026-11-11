@@ -27,7 +27,7 @@ export class AdaptiveObservability {
       .filter((inv) => runIds.has(inv.runId) && inv.startedAt >= since)
       .slice(0, limit);
     const events = (this.store.db.prepare(
-      "SELECT data FROM events WHERE json_extract(data,'$.at')>=? AND run_id LIKE 'asset:%' = 0 ORDER BY rowid DESC LIMIT ?"
+      "SELECT data FROM events WHERE json_extract(data,'$.at')>=? AND run_id NOT LIKE 'asset:%' ORDER BY rowid DESC LIMIT ?"
     ).all(since, limit) as {data:string}[]).map((row)=>JSON.parse(row.data) as Event)
       .filter((event)=>runIds.has(event.runId));
     const totals: Record<string, number> = {};
@@ -89,10 +89,6 @@ export class AdaptiveObservability {
   }
   private countKnowledgeEvents(since:string,limit:number) {
     // Searches can use task:* or knowledge:search event streams.
-    const r=this.store.db.prepare(
-      "SELECT COUNT(1) AS count FROM (SELECT id FROM events WHERE type IS NULL LIMIT 0)"
-    );
-    void r; // legacy events table lacks a dedicated type index
     const rows=this.store.db.prepare(
       "SELECT data FROM events WHERE (run_id LIKE 'task:%' OR run_id='knowledge:search') AND json_extract(data,'$.at')>=? LIMIT ?"
     ).all(since,limit) as {data:string}[];
