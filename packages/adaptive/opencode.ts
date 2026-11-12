@@ -58,7 +58,11 @@ export function renderOpenCodeConfig(mode:Mode,mcp:OpenCodeMcp) {
       action:name+"_"+safeName(tool),resource:"*",effect:"allow",
     });
   }
+  const agentName=mode==="worktree-write"?"aiwork_write":"aiwork_read";
   return {$schema:"https://opencode.ai/config.json",update:"disable",
+    default_agent:agentName,
+    agents:{[agentName]:{description:"AI Work OS controlled single-invocation agent",
+      mode:"primary",permissions}},
     permissions,mcp:{servers}};
 }
 
@@ -161,7 +165,7 @@ export async function runOpenCode(options:{
   try {
     const args=["run","--format","json","--dir",options.cwd,
       ...(options.model?["--model",options.model]:[]),
-      "--agent",options.mode==="worktree-write"?"build":"plan",
+      "--agent",options.mode==="worktree-write"?"aiwork_write":"aiwork_read",
       options.prompt+
       "\nReturn ONLY a single valid JSON object matching this schema, without Markdown:\n"+
       JSON.stringify(options.schema).slice(0,20000)];
