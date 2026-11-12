@@ -101,6 +101,17 @@ export class McpWriteService {
     return value;
   }
   list() { return this.store.list<WriteIntent>("adaptive_mcp_write"); }
+  private requireLinkedRunWaiting(item:WriteIntent) {
+    if(!item.runId)return;
+    const run=this.store.get<{status:string;nodeStates:Record<string,string>}>(
+      "adaptive_run",item.runId);
+    const linked=this.store.list<{runId:string;nodeId:string;mcpIntentId?:string;status:string}>(
+      "adaptive_invocation").filter((inv)=>inv.mcpIntentId===item.id &&
+        inv.runId===item.runId && inv.status==="waiting");
+    if(!run||run.status!=="waiting"||linked.length!==1||
+       run.nodeStates[linked[0].nodeId]!=="waiting")
+      throw new DomainError("mcp_run_inactive","关联工作流并非等待此项写入审批，禁止继续外部副作用",409);
+  }
   request(input: unknown) {
     const data = IntentInput.parse(input);
     const canonical = JSON.stringify(data.arguments);
@@ -137,6 +148,7 @@ export class McpWriteService {
     return this.store.transaction(() => {
       const item = this.get(id);
       if (item.status !== "requested") throw new DomainError("approval_state", "请求不再等待审批", 409);
+      this.requireLinkedRunWaiting(item);
       if (Date.now() > Date.parse(item.expiresAt)) throw new DomainError("approval_expired", "审批请求已过期", 409);
       if (item.argsDigest !== expectedArgsDigest ||
           digest(item.arguments) !== expectedArgsDigest)
@@ -157,6 +169,7 @@ export class McpWriteService {
     const item = this.store.transaction(() => {
       const current = this.get(id);
       if (current.status !== "approved") throw new DomainError("execution_state", "写操作未获得有效一次性授权", 409);
+      this.requireLinkedRunWaiting(current);
       if (Date.now() > Date.parse(current.expiresAt)) throw new DomainError("approval_expired", "授权已过期", 409);
       const server = this.registry.get(current.server);
       if (digest(server) !== current.serverDigest || digest(current.arguments) !== current.argsDigest)
