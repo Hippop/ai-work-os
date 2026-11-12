@@ -554,12 +554,13 @@ export class AdaptiveEngine {
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
         const message = String((error as Error).message).slice(0, 2000);
         const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
-        const uncertain = !!effect;
+        const uncertain = !!effect && effect.state !== "awaiting_approval";
         this.store.put("adaptive_invocation", { ...record, status: uncertain ? "uncertain" : "failed",
           finishedAt: new Date().toISOString(),
           durationMs: Date.now() - Date.parse(record.startedAt), error: message });
         if (effect) this.store.put("adaptive_side_effect", {
-          ...effect, state: "uncertain", reason: message, at: new Date().toISOString(),
+          ...effect, state: uncertain ? "uncertain" : "not_executed",
+          reason:message,at:new Date().toISOString(),
         });
         run.nodeStates[nodeId] = uncertain ? "uncertain" : "failed";
         run.failures[nodeId] = message;
@@ -569,6 +570,82 @@ export class AdaptiveEngine {
         this.store.event(id, uncertain ? "adaptive.side_effect.uncertain" : "adaptive.invocation.failed",
           { nodeId, invocationId: prepared.invocationId, message });
       });
+    }
+  }
+  /** Idempotently fold a separate, human-approved MCP result back into the DAG. */
+  syncMcpWriteIntent(intentId:string) {
+    const intent=this.store.get<WriteIntent>("adaptive_mcp_write",intentId);
+    if(!intent || !intent.runId) return null;
+    const pending=this.store.list<any>("adaptive_invocation").filter((inv) =>
+      inv.runId===intent.runId && inv.mcpIntentId===intentId);
+    if(pending.length!==1)return null;
+    const invocation=pending[0];
+    if(invocation.status!=="waiting")return this.get(intent.runId);
+    if(!["succeeded","rejected","uncertain","reconciled"].includes(intent.status))
+      return this.get(intent.runId);
+    const run=this.store.transaction(()=>{
+      const current=this.get(intent.runId!);
+      const record=this.store.get<any>("adaptive_invocation",invocation.id);
+      if(record?.status!=="waiting" || current.nodeStates[invocation.nodeId]!=="waiting" ||
+          current.status!=="waiting") return current;
+      const id=invocation.nodeId;
+      const effect=this.store.get<any>("adaptive_side_effect",record.id);
+      if(intent.status==="succeeded") {
+        const output={
+          summary:"MCP write completed after exact human approval",
+          evidence:["mcp-intent:"+intent.id,"result-sha256:"+intent.resultDigest],
+          risks:[],
+        };
+        checkSchema(current.snapshots[id].capability.outputSchema,output);
+        this.store.put("adaptive_invocation",{
+          ...record,status:"succeeded",finishedAt:new Date().toISOString(),
+          outputDigest:digest(output),mcpResultDigest:intent.resultDigest,
+        });
+        if(effect)this.store.put("adaptive_side_effect",{
+          ...effect,state:"confirmed",outputDigest:intent.resultDigest,
+          confirmedAt:new Date().toISOString(),
+        });
+        current.results[id]={
+          output,artifactRefs:[],invocationId:record.id,digest:digest(output),
+        };
+        current.nodeStates[id]="succeeded";
+        current.status="running";
+        this.activateObservations(current,id,"succeeded");
+        this.store.event(current.id,"adaptive.mcp.approval_completed",{
+          nodeId:id,invocationId:record.id,intentId:intent.id,
+          resultDigest:intent.resultDigest,
+        });
+      }else{
+        const uncertain=intent.status==="uncertain"||intent.status==="reconciled";
+        current.nodeStates[id]=uncertain?"uncertain":"failed";
+        current.status=uncertain?"reconciling":"failed";
+        const reason=uncertain
+          ? "MCP 写操作结果不确定，或仅有人工核对记录；不得自动继续 DAG"
+          : "MCP 写操作审批已拒绝";
+        current.failures[id]=reason;
+        this.store.put("adaptive_invocation",{
+          ...record,status:uncertain?"uncertain":"failed",
+          finishedAt:new Date().toISOString(),error:reason,
+        });
+        if(effect)this.store.put("adaptive_side_effect",{
+          ...effect,state:uncertain?"uncertain":"not_executed",
+          reason,at:new Date().toISOString(),
+        });
+        if(!uncertain)this.setTaskStatus(current.taskId,"planned");
+        this.store.event(current.id,uncertain?"adaptive.mcp.uncertain":"adaptive.mcp.rejected",{
+          nodeId:id,invocationId:record.id,intentId:intent.id,
+        });
+      }
+      this.save(current);
+      return current;
+    });
+    if(run.status==="running")this.notify();
+    return run;
+  }
+  syncPendingMcpWrites() {
+    for(const intent of this.store.list<WriteIntent>("adaptive_mcp_write")) {
+      if(intent.runId && ["succeeded","rejected","uncertain","reconciled"].includes(intent.status))
+        this.syncMcpWriteIntent(intent.id);
     }
   }
   private activateObservations(run: AdaptiveRun, nodeId: string, state: "succeeded" | "failed") {
