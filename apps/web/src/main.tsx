@@ -793,6 +793,7 @@ function App() {
                       repositoryPath: fd.get("repositoryPath"),
                       description: fd.get("description"),
                       allowAgent: fd.get("allowAgent") === "on",
+                      authorizedCommands: JSON.parse(String(fd.get("authorizedCommands") || "[]")),
                       ...(executable
                         ? {
                             testCommand: {
@@ -840,6 +841,11 @@ function App() {
                     placeholder='["--test"]'
                   />
                 </label>
+                <label>额外授权的程序命令 JSON（可选；独立于测试命令）
+                  <textarea name="authorizedCommands" rows={4} defaultValue="[]"
+                    placeholder='[{"name":"static-check","executable":"/usr/bin/node","args":["scripts/check.cjs"],"allowWorkspaceWrite":false}]'/>
+                </label>
+                <p>额外程序默认只读；只有明确设置 allowWorkspaceWrite=true 并配置隔离 Worktree 才允许修改代码。</p>
                 <label className="checkbox">
                   <input type="checkbox" name="allowAgent" />
                   授权 Agent 在隔离工作区修改代码，并运行上述测试程序
