@@ -66,6 +66,14 @@ export function bootstrapAdaptiveAssets(store: Store) {
       assets.publishCapability(cap.id);
     }
   }
+  if(!store.get("adaptive_capability","core.conclude@1.1.0")) {
+    const cap=assets.createCapability({name:"core.conclude",version:"1.1.0",title:"Evidence-backed diagnosis report",
+      description:"Produce a structured diagnosis report referencing only frozen evidence IDs; confirmed causes need verified causal experiments.",
+      operatingInstructions:"Return summary, evidence, risks and diagnosisReportJson. diagnosisReportJson must encode a JSON object with summary, hypotheses [{claim,supportingEvidence:[evidence UUID],contradictingEvidence:[evidence UUID],nextExperiment,status:open|supported|rejected}], conclusion {status:confirmed|likely|unresolved,hypothesisIndex:number|null,reason,unknowns:[string]}. Do not invent evidence. Use unresolved and nonempty unknowns if insufficient evidence. No writes or experiments are authorized.",
+      inputSchema:objectiveInput,outputSchema:{...resultOutput,properties:{...resultOutput.properties,diagnosisReportJson:{type:"string"}},required:[...resultOutput.required,"diagnosisReportJson"]},
+      sideEffect:"read",profileRef:"core.codex.read@1.0.0",tags:["diagnosis","conclude","diagnosis-report"]});
+    assets.validateCapability(cap.id,"Structured diagnosis output is checked against frozen evidence and causal gates");assets.publishCapability(cap.id);
+  }
   bootstrapCapabilityBuilder(store);
 }
 
@@ -77,7 +85,7 @@ export function standardAdaptivePlan(task: Task, agent: AgentBackend = "codex"):
     : ["analyze", "design", "implement", "test", "review", "deliver"];
   const nodes: Plan["nodes"] = operations.map((operation, i) => ({
     id: operation,
-    capabilityRef: "core." + operation + "@1.0.0",
+    capabilityRef: "core." + operation + (diagnosis && operation==="conclude"?"@1.1.0":"@1.0.0"),
     dependsOn: i ? [operations[i-1]] : [],
     inputs: { objective: task.objective },
     bindings: {},

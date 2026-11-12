@@ -7,7 +7,7 @@ export function selectCoreAgent(plan:Plan,agent:AgentBackend):Plan {
   return {
     ...plan,
     nodes:plan.nodes.map((node)=>{
-      const match=/^core\.([a-z]+)@1\.0\.0$/.exec(node.capabilityRef);
+      const match=/^core\.([a-z]+)@1\.(?:0|1)\.0$/.exec(node.capabilityRef);
       if(!match)return node;
       const operation=match[1];
       const profile=operation==="implement" ? "core."+agent+".write@1.0.0" :

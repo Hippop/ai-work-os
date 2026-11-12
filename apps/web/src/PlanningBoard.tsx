@@ -172,6 +172,7 @@ export function PlanningBoard({ tasks, projects, api, act, refresh }: Props) {
                   changes: {
                     title: fd.get("title"),
                     objective: fd.get("objective"),
+                    maxMinutes:Number(fd.get("maxMinutes")||30),
                     acceptanceCriteria: String(fd.get("criteria"))
                       .split("\n")
                       .map((s) => s.trim())
@@ -202,6 +203,10 @@ export function PlanningBoard({ tasks, projects, api, act, refresh }: Props) {
                 defaultValue={task.objective}
                 required
               />
+            </label>
+            <label>
+              任务时间预算（分钟，1～120）
+              <input name="maxMinutes" type="number" min="1" max="120" defaultValue={task.maxMinutes} required/>
             </label>
             <label>
               验收标准

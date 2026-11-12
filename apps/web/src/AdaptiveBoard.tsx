@@ -47,6 +47,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
   const [budgetUsd, setBudgetUsd] = useState("");
   const [costInfo, setCostInfo] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
+  const [eventPage,setEventPage]=useState(0);
+  useEffect(()=>{setEventPage(0);setEvents([]);},[selectedRun]);
   const [notice, setNotice] = useState("");
   const [preflight,setPreflight]=useState<{ready:boolean;checks:{label:string;passed:boolean;detail:string}[]}|null>(null);
   useEffect(()=>setPreflight(null),[taskId,plan]);
@@ -70,15 +72,16 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
   useEffect(() => { void act(load); }, []);
   useEffect(() => {
     if (!selectedRun) return;
+    let disposed=false;
     const get = () => Promise.all([
-      api("/v2/adaptive-runs"), api("/v2/adaptive-runs/" + selectedRun + "/events"),
+      api("/v2/adaptive-runs"), api("/v2/adaptive-runs/" + selectedRun + "/events?after="+eventPage*500),
       api("/v2/adaptive-runs/" + selectedRun + "/costs"),
       api("/v2/adaptive-runs/" + selectedRun + "/workspace"),
-    ]).then(([r,e,c,w]) => { setRuns(r); setEvents(e); setCostInfo(c); setWorkspace(w); }).catch(() => {});
+    ]).then(([r,e,c,w]) => { if(disposed)return;setRuns(r); setEvents(e); setCostInfo(c); setWorkspace(w); }).catch((error) => {if(!disposed)setNotice("刷新运行失败："+String(error));});
     void get();
     const timer = setInterval(() => { void get(); }, 3500);
-    return () => clearInterval(timer);
-  }, [selectedRun]);
+    return () => {disposed=true;clearInterval(timer);};
+  }, [selectedRun,eventPage]);
   async function downloadArtifact(runId:string,nodeId:string,artifactRef:string) {
     const name=artifactRef.split("/").pop() ?? "";
     const path="/api/v2/adaptive-runs/"+encodeURIComponent(runId)+
@@ -734,6 +737,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
           <b>{n.id}</b> · {n.capabilityRef} · {current.nodeStates[n.id] ?? "pending"}
           <small> · 依赖：{n.dependsOn.join(", ") || "无"}</small>
           {current.failures[n.id] && <p>{current.failures[n.id]}</p>}
+          {!!current.results[n.id]&&<details><summary>节点输出与证据</summary><pre>{json((current.results[n.id] as {output?:unknown}).output)}</pre></details>}
           {((current.results[n.id] as {artifactRefs?:string[]}|undefined)?.artifactRefs ?? []).map((artifact)=>(
             <button key={artifact} className="quiet" onClick={() => void act(async () => {
               await downloadArtifact(current.id,n.id,artifact);
@@ -803,6 +807,11 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
           }}>拒绝交付</button>
         </div>}
         <h3>事件时间线</h3>
+        <div className="actions">
+          <button className="quiet" disabled={eventPage===0} onClick={()=>setEventPage((p)=>p-1)}>上一页事件</button>
+          <span>第 {eventPage+1} 页 · 每页最多500条</span>
+          <button className="quiet" disabled={events.length<500} onClick={()=>setEventPage((p)=>p+1)}>下一页事件</button>
+        </div>
         {events.map((event) => <details key={event.id}>
           <summary>{event.seq} · {event.type} · {event.at}</summary><pre>{json(event.payload)}</pre>
         </details>)}

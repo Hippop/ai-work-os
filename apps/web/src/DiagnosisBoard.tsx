@@ -213,12 +213,20 @@ export function DiagnosisBoard({ tasks, api, act }: Props) {
             </button>
             {snapshot.reports.length === 0 && (
               <p>
-                在工作台启动此诊断任务，报告通过结构化校验后会出现在这里及执行台。
+                可从工作台或 V2 自适应工作流启动诊断，结构化报告通过证据校验后会出现在这里。
               </p>
             )}
             {snapshot.reports.map((r: any) => (
               <article className="project" key={r.id}>
                 <h3>{r.summary}</h3>
+                {r.runId&&<small>V2 运行：{r.runId} · 证据摘要：{r.inputDigest}</small>}
+                {tasks.find((t)=>t.id===id)?.status==="done" && ["confirmed","likely"].includes(r.conclusion.status)&&<button className="quiet" onClick={()=>{
+                  const objective=window.prompt("填写修复目标。可能根因仍需修复测试验证，不视为已确认事实。");if(!objective?.trim())return;
+                  const criteria=window.prompt("填写修复验收标准，每行一项");if(!criteria?.trim())return;
+                  void act(async()=>{const repair=await api(`/tasks/${id}/diagnosis/reports/${r.id}/repair-task`,{
+                    title:("修复："+r.summary).slice(0,200),objective,acceptanceCriteria:criteria.split("\n").map((s)=>s.trim()).filter(Boolean),
+                  });window.alert("修复任务已创建（尚未执行）："+repair.title+" · "+repair.id);await load();});
+                }}>创建关联修复任务</button>}
                 <span className="badge">
                   {
                     (

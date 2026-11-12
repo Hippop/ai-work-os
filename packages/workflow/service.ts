@@ -96,6 +96,25 @@ export class WorkService {
     this.store.put("project", project);
     return project;
   }
+  createRepairTask(taskId:string,reportId:string,input:unknown) {
+    const request=z.object({title:z.string().trim().min(1).max(200),objective:z.string().trim().min(1).max(20000),
+      acceptanceCriteria:z.array(z.string().trim().min(1).max(2000)).min(1).max(50),maxMinutes:z.number().int().min(1).max(120).default(30)}).strict().parse(input);
+    return this.store.transaction(()=>{
+      const source=this.required<Task>("task",taskId);
+      if(source.type!=="diagnosis"||source.status!=="done")throw new DomainError("diagnosis_not_accepted","请先验收诊断任务",409);
+      const report=this.required<{id:string;taskId:string;runId?:string;summary:string;inputDigest:string;conclusion:{status:string;reason:string;unknowns:string[]}}>("diagnosis_report",reportId);
+      if(report.taskId!==source.id)throw new DomainError("report_scope","报告不属于此任务",403);
+      if(report.runId && this.required<{status:string}>("adaptive_run",report.runId).status!=="done")
+        throw new DomainError("report_not_accepted","报告对应的运行尚未验收",409);
+      if(!["confirmed","likely"].includes(report.conclusion.status))throw new DomainError("diagnosis_unresolved","证据不足，请先补充诊断证据",422);
+      const previous=this.store.get<{id:string;taskId:string;requestDigest:string}>("diagnosis_repair",reportId);
+      if(previous){if(previous.requestDigest!==digest(request))throw new DomainError("repair_exists","此报告已创建修复任务，请编辑已有任务",409);return this.required<Task>("task",previous.taskId);}
+      const task=this.createTask({...request,type:"development",projectId:source.projectId,dependsOn:[source.id],
+        objective:request.objective+"\n\n诊断依据："+report.id+"\n证据摘要："+report.inputDigest+"\n结论级别："+report.conclusion.status+"\n"+report.summary+"\n"+report.conclusion.reason+"\n未知项："+report.conclusion.unknowns.join("；")});
+      this.store.put("diagnosis_repair",{id:reportId,sourceTaskId:taskId,taskId:task.id,requestDigest:digest(request),createdAt:new Date().toISOString()});
+      this.store.event("task:"+taskId,"diagnosis.repair.created",{reportId,repairTaskId:task.id},"user");return task;
+    });
+  }
   configureProject(id:string,input:unknown):Project {
     return this.store.transaction(()=>{
       const project=this.required<Project>("project",id);

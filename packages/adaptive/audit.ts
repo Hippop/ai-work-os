@@ -97,6 +97,7 @@ export class AdaptiveAuditService {
       format:"ai-work-os.adaptive-audit.v1",
       runId:id,taskId:run.taskId,runStatus:run.status,planRevision:run.planRevision,
       budgetUsd:run.budgetUsd??null,
+      diagnosisInputDigest:run.diagnosisSnapshot?.digest??null,
       createdAt:run.createdAt,updatedAt:run.updatedAt,
       planRevisions:revisions,invocations,costs,sideEffects,events,
       artifacts:Object.entries(run.results).flatMap(([nodeId,result])=>result.artifactRefs.map((path)=>({

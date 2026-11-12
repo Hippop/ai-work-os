@@ -222,6 +222,7 @@ function App() {
         objective: form.get("objective"),
         type: form.get("type"),
         priority: form.get("priority"),
+        maxMinutes:Number(form.get("maxMinutes")||30),
         flowRequirements: buildFlowRequest(form),
         projectId: form.get("projectId") || null,
         externalSkillIds: form.getAll("externalSkillIds").map(String),
@@ -1045,6 +1046,7 @@ function App() {
                   )}
                 </div>
               )}
+              <label>任务时间预算（分钟，包含等待与暂停）<input name="maxMinutes" type="number" min="1" max="120" defaultValue="30" required/></label>
               <label>外部 Skill（引用目录中的 SKILL.md，不复制）
                 <select name="externalSkillIds" multiple>
                   {externalSkills.filter((skill) => skill.status === "available").map((skill) => (

@@ -219,6 +219,15 @@ export class DiagnosisService {
       return updated;
     });
   }
+  reportFromSnapshot(taskId:string,input:unknown,snapshot:ReturnType<DiagnosisService["snapshot"]>,runId:string,nodeId:string) {
+    this.requireTask(taskId);
+    const result=validateDiagnosis(input,snapshot.evidence);
+    if(digest({evidence:snapshot.evidence,hypotheses:snapshot.hypotheses})!==snapshot.digest)
+      throw new DomainError("diagnosis_snapshot_changed","诊断证据快照摘要不一致",409);
+    const report={...result,id:randomUUID(),taskId,runId,nodeId,inputDigest:snapshot.digest,
+      evidenceSnapshot:snapshot.evidence,createdAt:new Date().toISOString()};
+    this.store.put("diagnosis_report",report);return report;
+  }
   report(taskId: string, input: unknown) {
     const snapshot = this.snapshot(taskId),
       result = validateDiagnosis(input, snapshot.evidence);

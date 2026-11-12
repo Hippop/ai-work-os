@@ -253,6 +253,8 @@ export function createApp(
       );
     },
   );
+  app.post("/api/v1/tasks/:id/diagnosis/reports/:reportId/repair-task",(req,res)=>
+    res.status(201).json(service.createRepairTask(req.params.id,req.params.reportId,req.body)));
   app.post("/api/v1/tasks/:id/diagnosis/reports", (req, res) =>
     res.status(201).json(diagnosis.report(req.params.id, req.body)),
   );
@@ -725,7 +727,11 @@ export function createApp(
     res.send(verifyArtifact(canonical, result.artifactDigests?.[selected]));
   });
   app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
-  app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
+  app.get("/api/v2/adaptive-runs/:id/events", (req, res) => {
+    adaptive.get(req.params.id);
+    const {after}=z.object({after:z.coerce.number().int().nonnegative().default(0)}).parse(req.query);
+    res.json(store.events(req.params.id,after));
+  });
   app.get("/api/v2/adaptive-runs/:id/side-effects", (req, res) =>
     res.json(store.list<{ runId: string }>("adaptive_side_effect").filter((item) => item.runId === req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/invocations", (req, res) =>

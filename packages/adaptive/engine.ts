@@ -1,3 +1,4 @@
+import { DiagnosisService, validateDiagnosis } from "../diagnosis/index.js";
 import { randomUUID } from "node:crypto";
 import { captureArtifactDigests, verifyArtifacts } from "./artifacts.js";
 import { workspaceDigest } from "../workspace/index.js";
@@ -48,6 +49,7 @@ export type AdaptiveRun = {
   nodeStates: Record<string, NState>; observationStates: Record<string, OState>;
   results: Record<string, { output: unknown; artifactRefs: string[]; artifactDigests?: Record<string,string>; invocationId: string; digest: string }>;
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
+  diagnosisSnapshot?: ReturnType<DiagnosisService["snapshot"]>;
   createdAt: string; updatedAt: string; budgetUsd?: number | null;
 };
 export const DecisionInput = z.object({
@@ -215,6 +217,8 @@ export class AdaptiveEngine {
       const task = this.store.get<Task>("task", taskId);
       if (!task || task.projectId !== projectId)
         throw new DomainError("task_scope", "任务与项目不匹配", 422);
+      if(task.type==="diagnosis" && [...capabilities.values()].some((c)=>!["read","none"].includes(c.sideEffect)))
+        throw new DomainError("diagnosis_readonly","诊断流程不允许代码或外部写入",403);
       // Explicit task requirements are constraints, not merely suggestions in the planner prompt.
       const requirements = task.flowRequirements;
       if (requirements?.mode === "compose") {
@@ -302,10 +306,13 @@ export class AdaptiveEngine {
         }
         if (budgetUsd !== null && profile.executor === "agent" && !profile.billing)
           throw new DomainError("billing_rates_missing","费用预算模式要求所有 Agent Profile 配置单价和预留 token",422);
+        if(task.type==="diagnosis" && !["read","none"].includes(cap.sideEffect))
+          throw new DomainError("diagnosis_readonly","诊断流程不允许代码或外部写入",403);
         snapshots[node.id] = { capability: cap, profileRef, profile, skillInstructions };
       }
       const run: AdaptiveRun = {
         id, taskId, taskRevision: task.revision, projectDigest: digest(task.projectId ? this.store.get("project",task.projectId) : null), status: "queued", planRevision: 1, plan, snapshots,
+        ...(task.type==="diagnosis"?{diagnosisSnapshot:new DiagnosisService(this.store).snapshot(task.id)}:{}),
         nodeStates: Object.fromEntries(plan.nodes.map((n) => [n.id, "pending"])),
         observationStates: {}, results: {}, failures: {}, decisions: {},
         revisionCount: 1, createdAt: now, updatedAt: now, budgetUsd,
@@ -566,6 +573,14 @@ export class AdaptiveEngine {
       checkSchema(prepared.capability.outputSchema, response.output);
       if (response.businessStatus === "rejected")
         throw new DomainError("business_rejected", "原子能力执行完成，但业务验收未通过", 422);
+      let diagnosisReport:unknown;
+      if(prepared.capability.tags.includes("diagnosis-report")) {
+        if(prepared.task.type!=="diagnosis" || !prepared.run.diagnosisSnapshot)
+          throw new DomainError("diagnosis_snapshot_missing","结构化诊断需要诊断任务与冻结证据快照",422);
+        try { diagnosisReport=JSON.parse((response.output as {diagnosisReportJson:string}).diagnosisReportJson); }
+        catch { throw new DomainError("diagnosis_report_json","诊断报告不是有效 JSON",422); }
+        validateDiagnosis(diagnosisReport,prepared.run.diagnosisSnapshot.evidence);
+      }
       if (prepared.capability.tags.includes("review")) {
         const report = response.output as { risks?: unknown };
         if (!Array.isArray(report.risks))
@@ -587,6 +602,10 @@ export class AdaptiveEngine {
           ...effect, state: "confirmed", outputDigest: digest(response.output),
           confirmedAt: new Date().toISOString(),
         });
+        if(diagnosisReport) {
+          const report=new DiagnosisService(this.store).reportFromSnapshot(run.taskId,diagnosisReport,run.diagnosisSnapshot!,id,nodeId);
+          this.store.event(id,"adaptive.diagnosis.reported",{reportId:report.id,inputDigest:report.inputDigest,conclusion:report.conclusion.status});
+        }
         run.results[nodeId] = { output: response.output, artifactRefs: response.artifacts ?? [], artifactDigests: captureArtifactDigests(response.artifacts ?? []), invocationId: prepared.invocationId, digest: digest(response.output) };
         run.nodeStates[nodeId] = "succeeded"; this.activateObservations(run, nodeId, "succeeded");
         this.save(run); this.store.event(id, "adaptive.invocation.completed", { nodeId, invocationId: prepared.invocationId, outputDigest: digest(response.output) });
@@ -887,6 +906,14 @@ export class AdaptiveEngine {
       if (!cap || profile.executor !== "manual")
         throw new DomainError("manual_forbidden", "不能伪造自动能力执行结果", 403);
       checkSchema(cap.outputSchema, output);
+      if(cap.tags.includes("diagnosis-report")) {
+        if(!run.diagnosisSnapshot)throw new DomainError("diagnosis_snapshot_missing","缺少冻结证据",422);
+        let report:unknown;
+        try { report=JSON.parse((output as {diagnosisReportJson:string}).diagnosisReportJson); }
+        catch { throw new DomainError("diagnosis_report_json","诊断报告不是有效 JSON",422); }
+        const recorded=new DiagnosisService(this.store).reportFromSnapshot(run.taskId,report,run.diagnosisSnapshot,id,nodeId);
+        this.store.event(id,"adaptive.diagnosis.reported",{reportId:recorded.id,inputDigest:recorded.inputDigest,conclusion:recorded.conclusion.status},"user");
+      }
       const invocation = this.store.list<any>("adaptive_invocation").find((v) =>
         v.runId === id && v.nodeId === nodeId && v.status === "waiting");
       if (!invocation) throw new DomainError("invocation_missing", "待确认调用不存在", 404);
