@@ -580,11 +580,19 @@ export function createApp(
   });
   app.post("/api/v2/tasks/:id/standard-plan", (req, res) => {
     const task = service.required<Task>("task", req.params.id);
-    const plan = standardAdaptivePlan(task);
-    res.json({ plan: adaptive.validate(plan, task.projectId, task.id), source: "deterministic-template" });
+    const {executionAgent} = z.object({
+      executionAgent:z.enum(["codex","opencode"]).default("codex"),
+    }).parse(req.body??{});
+    const plan = standardAdaptivePlan(task,executionAgent);
+    res.json({ plan: adaptive.validate(plan, task.projectId, task.id),
+      source: "deterministic-template",executionAgent });
   });
-  app.post("/api/v2/tasks/:id/compose", async (req, res) =>
-    res.json({ plan: await adaptive.compose(req.params.id) }));
+  app.post("/api/v2/tasks/:id/compose", async (req, res) => {
+    const {executionAgent} = z.object({
+      executionAgent:z.enum(["codex","opencode"]).default("codex"),
+    }).parse(req.body??{});
+    res.json({ plan: await adaptive.compose(req.params.id,executionAgent),executionAgent });
+  });
   const evalService = new AdaptiveEvaluationService(store);
   app.get("/api/v2/evaluations/datasets", (_req, res) =>
     res.json(evalService.listDatasets()));
