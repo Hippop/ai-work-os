@@ -14,6 +14,7 @@ import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
 import { BudgetService } from "./budget.js";
 import { summarizeCodexEvents } from "./telemetry.js";
 import { runOpenCode } from "./opencode.js";
+import { McpWriteService } from "./mcp-write.js";
 
 function strict(schema: any): any {
   if (Array.isArray(schema)) return schema.map(strict);
@@ -214,6 +215,16 @@ export class AdaptiveRuntime {
           return { output: report, artifacts };
         }
         return { output: { summary: "Builtin capability recorded input", evidence: [], risks: [] } };
+      }
+      if (profile.executor === "mcp-write") {
+        if (call.capability.sideEffect !== "external-write" || !profile.mcpWrite)
+          throw new DomainError("mcp_write_invalid","只有外部写入能力可以创建审批请求",422);
+        const intent=new McpWriteService(this.store).request({
+          server:profile.mcpWrite.server,tool:profile.mcpWrite.tool,
+          projectId:call.task.projectId,runId:call.run.id,
+          arguments:call.input,purpose:profile.mcpWrite.purpose,
+        });
+        return {output:null,pendingApproval:{intentId:intent.id}};
       }
       if (!project) throw new DomainError("project_required", "执行能力必须关联项目", 422);
       if (!project.allowAgent) throw new DomainError("agent_not_authorized", "项目未授权 Agent 执行", 422);
