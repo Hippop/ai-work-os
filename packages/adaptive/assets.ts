@@ -44,6 +44,7 @@ export const ExecutionProfileInput = z.object({
 export const CapabilityInput = z.object({
   name: key, version, title: z.string().trim().min(1).max(160),
   description: z.string().trim().min(1).max(4000),
+  operatingInstructions: z.string().max(8000).optional(),
   inputSchema: shape, outputSchema: shape,
   sideEffect: z.enum(["none", "read", "workspace-write", "external-write"]).default("read"),
   profileRef: z.string().max(180).nullable().default(null),
@@ -209,6 +210,7 @@ export class AssetService {
     const patch = z.object({
       title: z.string().trim().min(1).max(160).optional(),
       description: z.string().trim().min(1).max(4000).optional(),
+      operatingInstructions: z.string().max(8000).optional(),
       inputSchema: shape.optional(), outputSchema: shape.optional(),
       tags: z.array(z.string().max(60)).max(30).optional(),
       profileRef: z.string().max(180).nullable().optional(),
