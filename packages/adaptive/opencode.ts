@@ -1,7 +1,7 @@
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, constants } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import type { ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { DomainError, digest } from "../domain/index.js";
 import { execute, executablePath } from "../runtime/adapter.js";
 import { checkSchema } from "./assets.js";
@@ -177,4 +177,21 @@ export async function runOpenCode(options:{
         "OpenCode 执行失败（隐藏可能包含敏感信息的 stderr），退出码："+result.code,502);
     return parseOpenCodeEvents(result.stdout,options.schema);
   }finally{isolated.dispose();}
+}
+
+/** Local readiness probe; never starts a model session or executes a user prompt. */
+export function probeOpenCode(command=process.env.AI_WORK_OS_OPENCODE??"opencode") {
+  try {
+    const result=spawnSync(executablePath(command),["--version"],{
+      encoding:"utf8",timeout:5000,windowsHide:true,
+    });
+    return {id:"opencode",available:result.status===0,
+      version:result.status===0?String(result.stdout).trim():null,
+      capabilities:{jsonEvents:true,structuredOutput:"prompt-and-validate",
+        xdgIsolation:true,worktree:true,mcpReadOnly:true}};
+  }catch{
+    return {id:"opencode",available:false,version:null,
+      capabilities:{jsonEvents:true,structuredOutput:"prompt-and-validate",
+        xdgIsolation:true,worktree:true,mcpReadOnly:true}};
+  }
 }
