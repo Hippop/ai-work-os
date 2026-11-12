@@ -228,12 +228,29 @@ export class AdaptiveRuntime {
       }
       if (!project) throw new DomainError("project_required", "执行能力必须关联项目", 422);
       if (!project.allowAgent) throw new DomainError("agent_not_authorized", "项目未授权 Agent 执行", 422);
+      let authorizedProgram: {executable:string;args:string[];allowWorkspaceWrite?:boolean}|null=null;
       if (profile.executor === "program" || profile.executor === "project-test") {
-        if (!project.testCommand) throw new DomainError("test_command_required", "项目未配置可执行测试程序", 422);
-        if (profile.executor === "program" && (!profile.program ||
-          profile.program.executable !== project.testCommand.executable ||
-          JSON.stringify(profile.program.args) !== JSON.stringify(project.testCommand.args)))
-          throw new DomainError("program_not_allowed", "只能执行项目已授权的测试命令", 403);
+        if(profile.executor === "project-test") {
+          if(!project.testCommand)
+            throw new DomainError("test_command_required","项目未配置可执行测试程序",422);
+          if(profile.workspaceMode === "worktree-write")
+            throw new DomainError("test_write_denied","项目测试执行器不得具有工作区写入权限",403);
+          authorizedProgram=project.testCommand;
+        }else{
+          if(!profile.program)
+            throw new DomainError("program_required","程序能力没有已绑定的执行程序",422);
+          const same=(a:{executable:string;args:string[]}) =>
+            a.executable===profile.program!.executable &&
+            JSON.stringify(a.args)===JSON.stringify(profile.program!.args);
+          const match=(project.authorizedCommands??[]).find(same);
+          const test=project.testCommand && same(project.testCommand)
+            ? { ...project.testCommand,allowWorkspaceWrite:false }:null;
+          authorizedProgram=match??test;
+          if(!authorizedProgram)
+            throw new DomainError("program_not_allowed","命令未包含在项目显式授权列表中",403);
+          if(profile.workspaceMode==="worktree-write"&&!authorizedProgram.allowWorkspaceWrite)
+            throw new DomainError("program_write_denied","项目未授权该程序在工作区写入",403);
+        }
       }
       const mcp = new McpRegistry(this.store).resolve(profile.mcpGrants, call.task.projectId);
       const folder = join(this.dataDir, "adaptive", "invocations", call.run.id, call.invocationId);
@@ -262,13 +279,13 @@ export class AdaptiveRuntime {
         throw new DomainError("working_dir_escape", "工作目录越过授权根目录", 403);
       if (profile.executor === "program" || profile.executor === "project-test") {
         const before = workspaceDigest(workspace);
-        const program = profile.executor === "project-test" ? project.testCommand! : profile.program!;
+        const program = authorizedProgram!;
         const r = await execute(program.executable, program.args, workingDirectory,
           deadline, this.child,
           { cgroup: this.containment(profile) });
         if (r.code !== 0) throw new Error("Program returned " + r.code + ": " + r.stderr.slice(0, 800));
-        if (workspaceDigest(workspace) !== before)
-          throw new DomainError("program_changed_workspace", "测试命令更改了代码工作区", 422);
+        if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
+          throw new DomainError("program_changed_workspace", "只读程序修改了代码工作区", 422);
         const output = { summary: r.stdout.slice(0, 12000), evidence: [r.stderr.slice(0, 2000)], risks: [] };
         writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
         return { output, artifacts: [join(folder, "result.json")] };
