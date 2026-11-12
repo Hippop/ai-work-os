@@ -75,7 +75,7 @@ test("OpenCode mock CLI spans real adaptive planner, worktree write, tests, chec
     });
     runtime=new AdaptiveRuntime(store,data,"codex",undefined,"opencode");
     const engine=new AdaptiveEngine(store,new AssetService(store),runtime.executor(),runtime.planner());
-    const plan=await engine.compose(task.id);
+    const plan=await engine.compose(task.id,"opencode");
     assert.equal(plan.nodes.length,5);
     assert.equal(plan.nodes.find((x)=>x.id==="implement")?.profileRef,"core.opencode.write@1.0.0");
     const run=engine.createRun(task.id,plan);
