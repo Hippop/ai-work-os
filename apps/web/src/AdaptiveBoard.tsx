@@ -203,6 +203,12 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
     <McpWriteBoard api={api} act={act} projects={projects} servers={mcpServers}/>
     <div className="panel">
       <h2>Execution Profile · 执行配置</h2>
+      <button className="quiet" onClick={()=>void act(async()=>{
+        const agents=await api("/v2/agents/probe");
+        setNotice((agents as {id:string;available:boolean;version?:string|null}[])
+          .map((a)=>a.id+": "+(a.available?"已安装 "+(a.version??""):"未检测到 CLI")).join(" · "));
+      })}>检测 Codex / OpenCode CLI</button>
+      <p>规划与进度评估后端可以通过服务启动变量 AI_WORK_OS_PLANNER_AGENT=opencode 选择 OpenCode。</p>
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/profiles", {
         name: f.get("name"), version: f.get("version"), executor: f.get("executor"),
         agent: f.get("executor") === "agent" ? f.get("agent") : undefined,
