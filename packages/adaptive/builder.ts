@@ -38,6 +38,33 @@ export const BuilderProposalInput = z.object({
   rationale:z.string().min(10).max(3000),
 }).strict();
 export type BuilderProposal=z.infer<typeof BuilderProposalInput>;
+/**
+ * Codex --output-schema requires closed object properties. Dynamic JSON Schema
+ * fields are transferred as strings and parsed by the platform validator.
+ */
+export const BuilderModelOutput = z.object({
+  name:z.string(),title:z.string(),description:z.string(),operatingInstructions:z.string(),
+  inputSchemaJson:z.string(),outputSchemaJson:z.string(),
+  tags:z.array(z.string()),suggestedSideEffect:z.enum(["none","read","workspace-write","external-write"]),
+  suggestedExecutor:z.enum(["agent","program","manual","mcp-write"]),
+  sampleInputJson:z.string(),sampleOutputJson:z.string(),
+  questions:z.array(z.string()),rationale:z.string(),
+}).strict();
+export function parseBuilderModelOutput(value:unknown):BuilderProposal {
+  const reply=BuilderModelOutput.parse(value);
+  let fields:{inputSchema:unknown;outputSchema:unknown;sampleInput:unknown;sampleOutput:unknown};
+  try {
+    fields={
+      inputSchema:JSON.parse(reply.inputSchemaJson),outputSchema:JSON.parse(reply.outputSchemaJson),
+      sampleInput:JSON.parse(reply.sampleInputJson),sampleOutput:JSON.parse(reply.sampleOutputJson),
+    };
+  }catch {
+    throw new DomainError("builder_model_json","Builder Agent 返回的契约或样例 JSON 字符串无效",422);
+  }
+  const {inputSchemaJson,outputSchemaJson,sampleInputJson,sampleOutputJson,...other}=reply;
+  return BuilderProposalInput.parse({...other,...fields});
+}
+
 export type BuilderMaterial={
   kind:"inline"|"project-file"|"skill"|"knowledge";
   label:string;content:string;digest:string;source:string;
@@ -200,7 +227,7 @@ export class CapabilityBuilder {
       "Reference snapshots (immutable source digests):",
       JSON.stringify(input.materials.map(({kind,label,source,digest,content})=>
         ({kind,label,source,digest,content}))),
-      "Produce ONE atomic capability contract. Return strict JSON matching the specified BuilderProposal schema.",
+      "Produce ONE atomic capability contract. For the model output, encode inputSchema, outputSchema, sampleInput and sampleOutput as JSON STRINGS in inputSchemaJson, outputSchemaJson, sampleInputJson and sampleOutputJson. Return the other fields as normal. Do not wrap in Markdown.",
       "Do not invent successful tests, tools or permissions. Recommend effects only; execution remains read-only until a human authorizes a separate profile.",
     ].join("\n");
   }
