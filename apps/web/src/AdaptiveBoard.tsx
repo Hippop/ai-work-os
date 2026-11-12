@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { Task, Project } from "../../../packages/domain/index";
 import { McpWriteBoard } from "./McpWriteBoard";
+import { CapabilityBuilderBoard } from "./CapabilityBuilderBoard";
 type API = (path: string, data?: unknown, headers?: Record<string, string>) => Promise<any>;
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
@@ -111,6 +112,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       <p>Capability 定义输入输出，Profile 控制执行环境，Knowledge Hub 管理可引用知识。Agent 负责编排和评估；事件调度器控制运行状态。尚未配置可用 Codex 时可创建并验证手动 DAG。</p>
       {notice && <p role="status">{notice}</p>}
     </div>
+    <CapabilityBuilderBoard api={api} act={act} projects={projects}
+      skills={skills} knowledge={knowledge} profiles={profiles} onChanged={load}/>
     <div className="panel">
       <h2>Skill 导入与智能转化</h2>
       <form onSubmit={(e) => doForm(e, async (f) => {
