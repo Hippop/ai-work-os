@@ -36,6 +36,7 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
   const [sessions,setSessions]=useState<Session[]>([]);
   const [selected,setSelected]=useState<Session|null>(null);
   const [instruction,setInstruction]=useState("");
+  const [verifiedSample,setVerifiedSample]=useState<{input:unknown;output:unknown}|null>(null);
   const [message,setMessage]=useState("");
   const [busy,setBusy]=useState(false);
   const [installed,setInstalled]=useState<{skill:{id:string;digest:string};profiles:string[]}|null>(null);
@@ -77,6 +78,7 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
       const result=await api("/v2/capability-builder/sessions",{
         projectId,backend,profileRef:profileRef||undefined,goal:goal.trim(),materials,
       });
+      setVerifiedSample(null);
       setSelected({
         id:result.sessionId,projectId,backend,profileRef:profileRef||"",
         goal,capabilityId:result.capability.id,materials:result.materials,
@@ -95,6 +97,7 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
         {instruction:instruction.trim()});
       setSelected({...selected,proposal:result.proposal,
         revisions:[...selected.revisions,result.revision]});
+      setVerifiedSample(null);
       setInstruction("");
       setMessage("已按要求修改候选契约；仍需审核和验证");
       await reload();
@@ -173,7 +176,7 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
     </form>
     <h3>已创建的 Builder 会话</h3>
     <select value={selected?.id??""} onChange={(e)=>{
-      const s=sessions.find((v)=>v.id===e.target.value);setSelected(s??null);
+      const s=sessions.find((v)=>v.id===e.target.value);setSelected(s??null);setVerifiedSample(null);
     }}>
       <option value="">选择现有会话继续修改</option>
       {sessions.map((s)=><option key={s.id} value={s.id}>
@@ -211,12 +214,31 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
           setMessage(value.passed?"样例 Schema 检查通过（不代表模型实际运行）":"样例检查失败");
         })}>检查生成样例的 Schema</button>
         <button className="quiet" onClick={()=>void act(async()=>{
+          const result=await api("/v2/capabilities/"+encodeURIComponent(selected.capabilityId)+"/sample-run",{
+            projectId:selected.projectId,sampleInput:selected.proposal.sampleInput,
+          });
+          setVerifiedSample({input:selected.proposal.sampleInput,output:result.output});
+          setMessage("已通过真实只读 Agent 样例检查；请人工审核输出证据并决定是否验证");
+        })}>运行真实只读 Agent 样例</button>
+        {verifiedSample&&<button className="quiet" onClick={()=>{
+          const evidence=window.prompt("填写你审核真实样例输入/输出之后的验证依据（不允许使用 AI 的自我声明）");
+          if(!evidence?.trim())return;
+          void act(async()=>{
+            await api("/v2/capabilities/"+encodeURIComponent(selected.capabilityId)+"/validate",{
+              evidence,sample:verifiedSample,
+            });
+            await onChanged();
+            setMessage("人工验收成功，Candidate 已进入 validated；请在下方能力目录明确发布");
+          });
+        }}>人工审核样例并标记验证通过</button>}
+        <button className="quiet" onClick={()=>void act(async()=>{
           await api("/v2/capabilities/"+encodeURIComponent(selected.capabilityId)+"/candidate",
             {profileRef:candidateReadProfile,sideEffect:"read"});
           await onChanged();
           setMessage("已按你的明确操作绑定只读运行 Profile；下一步请真实测试并人工验证发布");
         })}>确认绑定预制只读执行配置</button>
       </div>
+      {verifiedSample&&<details open><summary>真实 Agent 样例输出（请人工审核）</summary><pre>{asJson(verifiedSample.output)}</pre></details>}
       <p><small>Schema、权限、副作用和材料均需人工审核；上方样例为 AI 推断，不能据此直接认定真实执行成功。需要进一步编辑可使用下方 Capability Registry。</small></p>
       <details><summary>修改历史</summary>
         {selected.revisions.map((r)=><p key={r.number}>
