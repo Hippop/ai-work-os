@@ -1,3 +1,5 @@
+import {ProjectRuntimeSettings} from "./ProjectRuntimeSettings";
+import { taskRunLink, type RunLink } from "./run-navigation";
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Task, Project, Run, Event } from "../../../packages/domain/index";
@@ -99,6 +101,8 @@ function App() {
         current: boolean;
       }[]
     >([]);
+  const [adaptiveRuns,setAdaptiveRuns] = useState<RunLink[]>([]);
+  const [selectedAdaptive,setSelectedAdaptive] = useState("");
   const [externalSkills, setExternalSkills] = useState<{ id: string; name: string; status: string }[]>([]);
   const [flowMode, setFlowMode] = useState<"standard" | "compose" | "graph">("standard");
   const [flowTaskType, setFlowTaskType] = useState("manual");
@@ -135,13 +139,14 @@ function App() {
     return result;
   }
   async function refresh() {
-    const [t, p, r, d, versions, importedSkills] = await Promise.all([
+    const [t, p, r, d, versions, importedSkills, adaptiveIndex] = await Promise.all([
       api<Task[]>("/tasks"),
       api<Project[]>("/projects"),
       api<Run[]>("/runs"),
       api<Delivery[]>("/deliveries"),
       api<typeof resources>("/resources"),
       api<typeof externalSkills>("/v2/external-skills"),
+      api<RunLink[]>("/v2/run-index"),
     ]);
     setTasks(t);
     setProjects(p);
@@ -149,6 +154,7 @@ function App() {
     setDeliveries(d);
     setResources(versions);
     setExternalSkills(importedSkills);
+    setAdaptiveRuns(adaptiveIndex);
   }
   async function act(fn: () => Promise<void>) {
     setBusy(true);
@@ -183,6 +189,11 @@ function App() {
     }, 3000);
     return () => clearInterval(timer);
   }, [selected, connected]);
+  useEffect(()=>{
+    if(!connected)return;
+    const timer=setInterval(()=>{void refresh().catch((e)=>setError(e.message));},5000);
+    return ()=>clearInterval(timer);
+  },[connected,token]);
   const active = tasks.filter((t) => t.status === "in_progress").length,
     pending = tasks.filter((t) => t.status === "awaiting_acceptance").length;
   async function prepare(task: Task) {
@@ -420,8 +431,10 @@ function App() {
                         className="quiet"
                         disabled={busy}
                         onClick={() => {
-                          const run = runs.find((r) => r.taskId === task.id);
-                          if (
+                          const run = taskRunLink(task.id,runs,adaptiveRuns);
+                          if (run?.engine === "adaptive") {
+                            setSelectedAdaptive(run.id);setPage("自适应工作流");
+                          } else if (
                             run &&
                             [
                               "in_progress",
@@ -492,11 +505,17 @@ function App() {
             <div className="execution">
               <div className="panel run-list">
                 <h2>运行记录</h2>
-                {runs.length === 0 && (
+                {runs.length === 0 && adaptiveRuns.length === 0 && (
                   <p className="muted">
                     暂无运行，请先创建任务并检查执行准备。
                   </p>
                 )}
+                {adaptiveRuns.map((run)=><button key={run.id} className="run-link" onClick={()=>{
+                  setSelectedAdaptive(run.id);setPage("自适应工作流");
+                }}><b>{tasks.find((t)=>t.id===run.taskId)?.title}</b>
+                  <span>{labels[run.status]??run.status} · 自适应工作流</span>
+                  <small>{new Date(run.createdAt).toLocaleString("zh-CN")}</small>
+                </button>)}
                 {runs.map((run) => (
                   <button
                     key={run.id}
@@ -741,7 +760,7 @@ function App() {
             />
           )}
           {page === "能力与知识" && <ResourceManager api={api} act={act} refresh={refresh} />}
-          {page === "自适应工作流" && <AdaptiveBoard api={api} act={act} token={token} tasks={tasks} projects={projects} />}
+          {page === "自适应工作流" && <AdaptiveBoard api={api} act={act} token={token} tasks={tasks} projects={projects} initialRunId={selectedAdaptive} onChanged={refresh} />}
           {page === "目标与计划" && (
             <PlanningBoard
               tasks={tasks}
@@ -793,6 +812,10 @@ function App() {
                       repositoryPath: fd.get("repositoryPath"),
                       description: fd.get("description"),
                       allowAgent: fd.get("allowAgent") === "on",
+                      ...(String(fd.get("setupExecutable")||"").trim() ? {setupCommand:{
+                        executable:String(fd.get("setupExecutable")).trim(),
+                        args:JSON.parse(String(fd.get("setupArgs")||"[]")),
+                      }} : {}),
                       authorizedCommands: JSON.parse(String(fd.get("authorizedCommands") || "[]")),
                       ...(executable
                         ? {
@@ -841,6 +864,13 @@ function App() {
                     placeholder='["--test"]'
                   />
                 </label>
+                <label>隔离工作区初始化程序（可选，仅 V2；会使用本机权限执行）
+                  <input name="setupExecutable" placeholder="例如 /usr/bin/npm"/>
+                </label>
+                <label>初始化参数 JSON
+                  <input name="setupArgs" defaultValue="[]" placeholder='["ci"]'/>
+                </label>
+                <p>新 Worktree 不继承 node_modules、虚拟环境或未跟踪配置。初始化命令在每次运行的新工作区执行一次；仅配置受信任命令。</p>
                 <label>额外授权的程序命令 JSON（可选；独立于测试命令）
                   <textarea name="authorizedCommands" rows={4} defaultValue="[]"
                     placeholder='[{"name":"static-check","executable":"/usr/bin/node","args":["scripts/check.cjs"],"allowWorkspaceWrite":false}]'/>
@@ -860,6 +890,7 @@ function App() {
                   <h3>{p.name}</h3>
                   <code>{p.repositoryPath}</code>
                   <p>{p.description}</p>
+                  <ProjectRuntimeSettings key={JSON.stringify(p)} project={p} api={api} act={act} onChanged={refresh}/>
                 </article>
               ))}
             </div>

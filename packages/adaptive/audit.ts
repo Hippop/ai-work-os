@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { createHash } from "node:crypto";
 import { DomainError, digest, type Event } from "../domain/index.js";
 import { Store } from "../persistence/index.js";
@@ -98,6 +99,9 @@ export class AdaptiveAuditService {
       budgetUsd:run.budgetUsd??null,
       createdAt:run.createdAt,updatedAt:run.updatedAt,
       planRevisions:revisions,invocations,costs,sideEffects,events,
+      artifacts:Object.entries(run.results).flatMap(([nodeId,result])=>result.artifactRefs.map((path)=>({
+        nodeId,name:basename(path),sha256:result.artifactDigests?.[path]??null,
+      }))),
       finalChainHash:chainHash,
       limitations:[
         "This snapshot is locally hashed but not externally signed or append-only.",

@@ -25,9 +25,9 @@ const defaultOutput = {
 const initialPlan: Flow = {
   nodes: [], observations: [], rationale: "Use published atomic capabilities",
 };
-export function AdaptiveBoard({ api, act, token, tasks, projects }: {
+export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId = "", onChanged }: {
   api: API; act: (fn: () => Promise<void>) => Promise<void>; token: string;
-  tasks: Task[]; projects: Project[];
+  tasks: Task[]; projects: Project[]; initialRunId?: string; onChanged?:()=>Promise<void>;
 }) {
   const [caps, setCaps] = useState<Item[]>([]);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -37,7 +37,9 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [sources, setSources] = useState<Source[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [selectedRun, setSelectedRun] = useState("");
+  const [selectedRun, setSelectedRun] = useState(initialRunId);
+  useEffect(()=>{if(initialRunId)setSelectedRun(initialRunId);},[initialRunId]);
+  const [workspace,setWorkspace] = useState<{available:boolean;digest:string|null}|null>(null);
   const [taskId, setTaskId] = useState("");
   const [skillId, setSkillId] = useState("");
   const [skillProjectId, setSkillProjectId] = useState("");
@@ -46,6 +48,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [costInfo, setCostInfo] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [notice, setNotice] = useState("");
+  const [preflight,setPreflight]=useState<{ready:boolean;checks:{label:string;passed:boolean;detail:string}[]}|null>(null);
+  useEffect(()=>setPreflight(null),[taskId,plan]);
   const [analytics, setAnalytics] = useState<any>(null);
   const [evalDatasets, setEvalDatasets] = useState<any[]>([]);
   const [evalResults, setEvalResults] = useState<any[]>([]);
@@ -60,6 +64,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       api("/v2/skill-sources"), api("/v2/external-skills"), api("/v2/adaptive-runs"), api("/v2/mcp-servers"), api("/v2/analytics"), api("/v2/knowledge-bindings"),
       api("/v2/evaluations/datasets"),api("/v2/evaluations"),
     ]);
+    await onChanged?.();
     setCaps(c); setProfiles(p); setKnowledge(k); setSources(s); setSkills(sk); setRuns(r); setMcpServers(mcp); setAnalytics(stats); setBindings(bind); setEvalDatasets(datasets); setEvalResults(evaluations);
   }
   useEffect(() => { void act(load); }, []);
@@ -68,7 +73,8 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
     const get = () => Promise.all([
       api("/v2/adaptive-runs"), api("/v2/adaptive-runs/" + selectedRun + "/events"),
       api("/v2/adaptive-runs/" + selectedRun + "/costs"),
-    ]).then(([r,e,c]) => { setRuns(r); setEvents(e); setCostInfo(c); }).catch(() => {});
+      api("/v2/adaptive-runs/" + selectedRun + "/workspace"),
+    ]).then(([r,e,c,w]) => { setRuns(r); setEvents(e); setCostInfo(c); setWorkspace(w); }).catch(() => {});
     void get();
     const timer = setInterval(() => { void get(); }, 3500);
     return () => clearInterval(timer);
@@ -520,7 +526,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       <label>选择任务
         <select value={taskId} onChange={(e)=>setTaskId(e.target.value)}>
           <option value="">请选择任务</option>
-          {tasks.map((t) => <option key={t.id} value={t.id}>{t.title}（{t.type}）</option>)}
+          {tasks.filter((t)=>!["done","cancelled","awaiting_acceptance","in_progress"].includes(t.status)).map((t) => <option key={t.id} value={t.id}>{t.title}（{t.type}）</option>)}
         </select>
       </label>
       <label>核心原子能力的 Agent 执行后端
@@ -551,12 +557,18 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           });
           setPlan(json(result.plan)); setNotice("工作流通过校验（尚未执行）");
         })}>验证 DAG / 依赖 / 授权</button>
+        <button disabled={!taskId} className="quiet" onClick={()=>void act(async()=>{
+          setPreflight(await api("/v2/tasks/"+taskId+"/preflight",{plan:JSON.parse(plan)}));
+        })}>检查项目环境与执行器</button>
         <button disabled={!taskId} onClick={() => void act(async () => {
           const result = await api("/v2/adaptive-runs", { taskId, plan: JSON.parse(plan),
             budgetUsd: budgetUsd.trim() ? Number(budgetUsd) : null });
           setSelectedRun(result.id); setNotice("已创建自适应运行：" + result.id); await load();
         })}>确认并下发执行</button>
       </div>
+      {preflight&&<div role="status"><b>{preflight.ready?"环境检查通过（认证和模型仍需实际验证）":"环境检查未通过"}</b>
+        {preflight.checks.map((c)=><p key={c.label}>{c.passed?"✓":"待处理"} {c.label}：{c.detail}</p>)}
+      </div>}
       <p>观察点默认阻塞受影响后继节点；失败事件同样可触发评估。运行中的结果不能由编排 Agent 原地覆盖。当前按需调用仍以单机 Linux 为优先目标。</p>
     </div>
     <div className="panel">
@@ -667,6 +679,31 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       </label>
       {current && <>
         <p>状态：<strong>{current.status}</strong> · 计划版本：{current.planRevision}</p>
+        <div className="actions">
+          {["queued","running","waiting","awaiting_acceptance"].includes(current.status) && <>
+            <button onClick={()=>void act(async()=>{
+              await api("/v2/adaptive-runs/"+current.id+"/stop",{mode:"pause"});await load();
+            })}>停止当前执行并保留现场</button>
+            <button className="quiet" onClick={()=>void act(async()=>{
+              await api("/v2/adaptive-runs/"+current.id+"/stop",{mode:"cancel"});await load();
+            })}>停止并取消运行</button>
+          </>}
+          {current.status==="paused" && <button onClick={()=>void act(async()=>{
+            await api("/v2/adaptive-runs/"+current.id+"/resume",{});await load();
+          })}>继续已暂停运行</button>}
+          {["failed","paused"].includes(current.status) && workspace?.available && <button className="quiet" onClick={()=>{
+            const note=window.prompt("请先确认进程已停止，并检查工作区、初始化依赖与已有代码修改。填写至少20字的核对依据。接纳后将重新执行分析、测试和审查，已核对写入不会重放。");
+            if(!note||note.trim().length<20)return;
+            void act(async()=>{
+              await api("/v2/adaptive-runs/"+current.id+"/adopt-workspace",{expectedDigest:workspace.digest,note});await load();
+            });
+          }}>核对并接纳现有工作区，重新验证</button>}
+          {["failed","paused","waiting"].includes(current.status) && <button className="quiet" onClick={()=>void act(async()=>{
+            await api("/v2/adaptive-runs/"+current.id+"/cancel",{});await load();
+          })}>结束本次运行</button>}
+        </div>
+        {["pausing","cancelling"].includes(current.status)&&<p>正在停止本次运行的进程并核对结果，请等待。</p>}
+        {current.status==="reconciling"&&<p>执行结果尚不确定。请逐项核对下方调用、遗留进程及外部影响，完成后再决定结束或接纳工作区。</p>}
         <button className="quiet" onClick={()=>void act(async()=>downloadRunAudit(current.id))}>
           下载本次运行审计摘要（SHA-256 链，原始参数与模型输出已省略）
         </button>
@@ -712,11 +749,11 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
               });
             }}>人工核对该未确认调用</button>}
           {current.nodeStates[n.id] === "failed" &&
-            current.status === "waiting" && 
+            ["waiting","failed"].includes(current.status) &&
             <button className="quiet" onClick={() => void act(async () => {
               await api("/v2/adaptive-runs/"+current.id+"/retry",{nodeId:n.id}); await load();
             })}>请求安全重试（写入能力将被拒绝）</button>}
-          {current.nodeStates[n.id] === "waiting" &&
+          {current.status === "waiting" && current.nodeStates[n.id] === "waiting" &&
             <button onClick={() => {
               const v = window.prompt("填写符合该能力输出 Schema 的 JSON");
               if (!v) return;
@@ -733,7 +770,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
               await api("/v2/adaptive-runs/"+current.id+"/observations/"+o.id+"/replan",{});
               await load();
             })}>重试经校验的重规划</button>}
-          {(current.observationStates[o.id] === "waiting" ||
+          {current.status === "waiting" && (current.observationStates[o.id] === "waiting" ||
             (current.status==="waiting" &&
               ["WAIT_INPUT","WAIT_APPROVAL"].includes(current.decisions[o.id]?.decision))) &&
             <button onClick={() => void act(async () => {

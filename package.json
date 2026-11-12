@@ -9,10 +9,10 @@
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "tsx watch apps/server/index.ts",
     "dev:web": "vite",
-    "start": "tsx apps/server/index.ts",
+    "start": "node --import tsx apps/server/index.ts",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "smoke:adaptive:linux": "tsx scripts/smoke-adaptive-linux.ts",
     "smoke:opencode:linux": "tsx scripts/smoke-opencode-linux.ts"

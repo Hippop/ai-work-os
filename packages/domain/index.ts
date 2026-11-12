@@ -78,6 +78,10 @@ export const ProjectInput = z.object({
       args: z.array(z.string().max(4000)).max(100),
     })
     .optional(),
+  setupCommand: z.object({
+    executable: z.string().min(1).max(2000),
+    args: z.array(z.string().max(4000)).max(100),
+  }).strict().optional(),
   authorizedCommands: z.array(z.object({
     name:z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
     executable:z.string().min(1).max(2000),

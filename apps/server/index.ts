@@ -42,7 +42,7 @@ const supervisor = new Supervisor(
 supervisor.start();
 bootstrapAdaptiveAssets(store);
 const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
-const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
+const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner(), adaptiveRuntime.control());
 adaptive.recover();
 new McpWriteService(store).recover();
 adaptive.syncPendingMcpWrites();

@@ -1,3 +1,4 @@
+import { verifyArtifact } from "../../packages/adaptive/artifacts.js";
 import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
 import { AssetService, checkSchema } from "../../packages/adaptive/assets.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
@@ -47,6 +48,7 @@ export function createApp(
   adaptive = new AdaptiveEngine(store),
   adaptiveRuntime?: AdaptiveRuntime,
 ) {
+  if (adaptiveRuntime && !adaptive.control) adaptive.control = adaptiveRuntime.control?.();
   const app = express();
   const resources = new ResourceService(store);
   const planning = new PlanningService(store),
@@ -333,6 +335,7 @@ export function createApp(
     ),
   );
   app.get("/api/v1/projects", (_req, res) => res.json(store.list("project")));
+  app.post("/api/v1/projects/:id/runtime-configuration",(req,res)=>res.json(service.configureProject(req.params.id,req.body)));
   app.post("/api/v1/projects", (req, res) =>
     res.status(201).json(service.createProject(req.body)),
   );
@@ -646,12 +649,25 @@ export function createApp(
   });
   app.get("/api/v2/adaptive-runs/:id/audit", (req, res) =>
     res.json(new AdaptiveAuditService(store).exportRun(req.params.id)));
+  app.get("/api/v2/run-index", (_req,res)=>res.json(store.list<{id:string;taskId:string;status:string;createdAt:string}>("adaptive_run")
+    .map(({id,taskId,status,createdAt})=>({id,taskId,status,createdAt,engine:"adaptive"}))));
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
+  app.post("/api/v2/tasks/:id/preflight",(req,res)=>{
+    if(!adaptiveRuntime)throw new DomainError("runtime_unavailable","执行器不可用",503);
+    const task=service.required<Task>("task",req.params.id);
+    const {plan}=z.object({plan:z.unknown()}).strict().parse(req.body);
+    res.json(adaptiveRuntime.preflight(task,adaptive.validate(plan,task.projectId,task.id)));
+  });
   app.post("/api/v2/adaptive-runs", (req, res) => {
     const b = z.object({
       taskId: z.string().uuid(), plan: z.unknown(),
       budgetUsd: z.number().finite().positive().max(1000).nullable().default(null),
     }).parse(req.body);
+    if(adaptiveRuntime) {
+      const task=service.required<Task>("task",b.taskId);
+      const preflight=adaptiveRuntime.preflight(task,adaptive.validate(b.plan,task.projectId,task.id));
+      if(!preflight.ready)throw new DomainError("preflight_failed",preflight.checks.filter((c)=>!c.passed).map((c)=>c.label+"："+c.detail).join("；"),422);
+    }
     res.status(201).json(adaptive.createRun(b.taskId, b.plan, b.budgetUsd));
   });
   app.get("/api/v2/adaptive-runs/:id/costs", (req, res) => {
@@ -706,7 +722,7 @@ export function createApp(
     if (!info.isFile() || info.size > 16 * 1024 * 1024)
       throw new DomainError("artifact_invalid", "不支持此工件类型或大小", 422);
     res.attachment(name);
-    res.send(readFileSync(canonical));
+    res.send(verifyArtifact(canonical, result.artifactDigests?.[selected]));
   });
   app.get("/api/v2/adaptive-runs/:id", (req, res) => res.json(adaptive.get(req.params.id)));
   app.get("/api/v2/adaptive-runs/:id/events", (req, res) => res.json(store.events(req.params.id, Number(req.query.after ?? 0))));
@@ -727,6 +743,17 @@ export function createApp(
   app.post("/api/v2/adaptive-runs/:id/accept", (req, res) => {
     const b = z.object({ accepted: z.boolean(), reason: z.string().default("") }).parse(req.body);
     res.json(adaptive.accept(req.params.id, b.accepted, b.reason));
+  });
+  app.get("/api/v2/adaptive-runs/:id/workspace", (req,res)=>res.json(adaptive.inspectWorkspace(req.params.id,
+    ["failed","paused","reconciling"].includes(adaptive.get(req.params.id).status))));
+  app.post("/api/v2/adaptive-runs/:id/stop", async (req,res)=>{
+    const {mode}=z.object({mode:z.enum(["pause","cancel"])}).strict().parse(req.body);
+    res.json(await adaptive.stop(req.params.id,mode));
+  });
+  app.post("/api/v2/adaptive-runs/:id/resume",(req,res)=>res.json(adaptive.resume(req.params.id)));
+  app.post("/api/v2/adaptive-runs/:id/adopt-workspace",(req,res)=>{
+    const {expectedDigest,note}=z.object({expectedDigest:z.string().regex(/^[a-f0-9]{64}$/),note:z.string().trim().min(20).max(4000)}).strict().parse(req.body);
+    res.json(adaptive.adoptWorkspace(req.params.id,expectedDigest,note));
   });
   app.post("/api/v2/adaptive-runs/:id/cancel", (req, res) => res.json(adaptive.cancel(req.params.id)));
   app.post("/api/v2/adaptive-runs/:id/retry", (req, res) => {

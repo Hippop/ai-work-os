@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { captureArtifactDigests, verifyArtifacts } from "./artifacts.js";
+import { workspaceDigest } from "../workspace/index.js";
 import { z } from "zod";
 import { Store } from "../persistence/index.js";
 import { DomainError, digest, type Task } from "../domain/index.js";
@@ -41,10 +43,10 @@ export type Plan = z.infer<typeof PlanInput>;
 type NState = "pending" | "running" | "succeeded" | "skipped" | "failed" | "waiting" | "uncertain" | "invalidated";
 type OState = "pending" | "running" | "waiting" | "completed";
 export type AdaptiveRun = {
-  id: string; taskId: string; status: "queued" | "running" | "waiting" | "reconciling" | "failed" | "awaiting_acceptance" | "done" | "cancelled";
+  id: string; taskId: string; taskRevision?: number; projectDigest?: string; stopRequested?: "pause" | "cancel"; workspaceCheckpoint?: string; status: "paused" | "pausing" | "cancelling" | "queued" | "running" | "waiting" | "reconciling" | "failed" | "awaiting_acceptance" | "done" | "cancelled";
   planRevision: number; plan: Plan; snapshots: Record<string, { capability: Capability; profileRef: string | null; profile: Profile; skillInstructions: { id: string; name: string; content: string; digest: string; references: {relativePath:string;content:string;digest:string}[] }[] }>;
   nodeStates: Record<string, NState>; observationStates: Record<string, OState>;
-  results: Record<string, { output: unknown; artifactRefs: string[]; invocationId: string; digest: string }>;
+  results: Record<string, { output: unknown; artifactRefs: string[]; artifactDigests?: Record<string,string>; invocationId: string; digest: string }>;
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
   createdAt: string; updatedAt: string; budgetUsd?: number | null;
 };
@@ -67,6 +69,10 @@ export type Planner = {
   compose(task: Task, catalog: Capability[], knowledge: ReturnType<AssetService["retrieveKnowledge"]>, previous?: AdaptiveRun): Promise<Plan>;
   evaluate(context: EvalCall): Promise<Decision>;
 };
+export type RuntimeControl = {
+  stop(runId: string): Promise<void>;
+  resume(runId: string): void;
+};
 export type Executor = (call: CapabilityCall) => Promise<{
   output: unknown; artifacts?: string[];
   businessStatus?: "accepted" | "rejected" | "unknown";
@@ -82,7 +88,31 @@ export class AdaptiveEngine {
   setWake(handler: () => void) { this.wake = handler; }
   private notify() { this.wake?.(); }
   constructor(public store: Store, public assets = new AssetService(store),
-    public executor?: Executor, public planner?: Planner) {}
+    public executor?: Executor, public planner?: Planner, public control?: RuntimeControl) {}
+  private assertTaskReady(task: Task, accepting = false) {
+    if (task.dependsOn.some((id) => this.store.get<Task>("task", id)?.status !== "done"))
+      throw new DomainError("dependency_incomplete", "前置任务尚未全部验收");
+    if (accepting && this.store.list<Task>("task").some((t) => t.parentId === task.id && t.status !== "done"))
+      throw new DomainError("children_incomplete", "必需子任务尚未全部验收");
+  }
+  private assertNoExternalInFlight(run:AdaptiveRun) {
+    for(const invocation of this.store.list<{runId:string;mcpIntentId?:string}>("adaptive_invocation").filter((i)=>i.runId===run.id && i.mcpIntentId)) {
+      const intent=this.store.get<WriteIntent>("adaptive_mcp_write",invocation.mcpIntentId!);
+      if(intent && ["executing","uncertain"].includes(intent.status))
+        throw new DomainError("external_inflight","外部写入正在执行或结果不确定，必须先核对外部状态",409);
+    }
+  }
+  private assertOwnership(run: AdaptiveRun) {
+    const task = this.store.get<Task>("task", run.taskId);
+    if (!task || (run.taskRevision !== undefined && run.taskRevision !== task.revision))
+      throw new DomainError("stale_run", "任务版本已改变，请创建新运行");
+    if (run.projectDigest && run.projectDigest !== digest(task.projectId ? this.store.get("project",task.projectId) : null))
+      throw new DomainError("project_changed","项目执行配置已改变，请创建新的运行",409);
+    if (this.store.list<AdaptiveRun>("adaptive_run").some((r) => r.id !== run.id && r.taskId === run.taskId && !["done","failed","cancelled"].includes(r.status)) ||
+        this.store.list<{taskId:string;status:string}>("run").some((r) => r.taskId === run.taskId && !["succeeded","failed","cancelled"].includes(r.status)))
+      throw new DomainError("active_run", "该任务已有其他活跃运行");
+    return task;
+  }
   validate(input: unknown, projectId: string | null, taskId?: string): Plan {
     const plan = PlanInput.parse(input);
     const by = byId(plan.nodes);
@@ -245,6 +275,10 @@ export class AdaptiveEngine {
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
     const plan = this.validate(planInput, task.projectId, task.id);
     const created = this.store.transaction(() => {
+      const task = this.store.get<Task>("task", taskId)!;
+      if (["done","cancelled","awaiting_acceptance"].includes(task.status))
+        throw new DomainError("task_closed", "请先验收当前交付或显式建立新的任务版本");
+      this.assertTaskReady(task);
       if (this.store.list<AdaptiveRun>("adaptive_run").some((r) => r.taskId === task.id && !["done", "failed", "cancelled"].includes(r.status)))
         throw new DomainError("active_run", "任务已有活跃的自适应运行");
       if (this.store.list<{taskId:string;status:string}>("run").some((r) =>
@@ -271,7 +305,7 @@ export class AdaptiveEngine {
         snapshots[node.id] = { capability: cap, profileRef, profile, skillInstructions };
       }
       const run: AdaptiveRun = {
-        id, taskId, status: "queued", planRevision: 1, plan, snapshots,
+        id, taskId, taskRevision: task.revision, projectDigest: digest(task.projectId ? this.store.get("project",task.projectId) : null), status: "queued", planRevision: 1, plan, snapshots,
         nodeStates: Object.fromEntries(plan.nodes.map((n) => [n.id, "pending"])),
         observationStates: {}, results: {}, failures: {}, decisions: {},
         revisionCount: 1, createdAt: now, updatedAt: now, budgetUsd,
@@ -304,7 +338,14 @@ export class AdaptiveEngine {
       for (const run of this.store.list<AdaptiveRun>("adaptive_run")) {
         const runningNodes = Object.entries(run.nodeStates).filter(([, state]) => state === "running");
         const runningObservations = Object.entries(run.observationStates).filter(([, state]) => state === "running");
-        if (!runningNodes.length && !runningObservations.length) continue;
+        if (!runningNodes.length && !runningObservations.length) {
+          if (["pausing","cancelling"].includes(run.status)) {
+            run.status = run.stopRequested === "cancel" ? "cancelled" : "paused";
+            this.save(run);
+            if (run.status === "cancelled") this.setTaskStatus(run.taskId,"planned");
+          }
+          continue;
+        }
         for (const [key] of runningNodes) {
           run.nodeStates[key] = "uncertain";
           for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
@@ -464,7 +505,7 @@ export class AdaptiveEngine {
   private async executeNode(id: string, nodeId: string) {
     const prepared = this.store.transaction(() => {
       const run = this.get(id), node = run.plan.nodes.find((n) => n.id === nodeId)!;
-      if (run.nodeStates[nodeId] !== "pending") return null;
+      if (!["queued","running"].includes(run.status) || run.stopRequested || run.nodeStates[nodeId] !== "pending") return null;
       const input = this.input(run, node);
       const cap = run.snapshots[nodeId].capability;
       const invocationId = randomUUID();
@@ -546,7 +587,7 @@ export class AdaptiveEngine {
           ...effect, state: "confirmed", outputDigest: digest(response.output),
           confirmedAt: new Date().toISOString(),
         });
-        run.results[nodeId] = { output: response.output, artifactRefs: response.artifacts ?? [], invocationId: prepared.invocationId, digest: digest(response.output) };
+        run.results[nodeId] = { output: response.output, artifactRefs: response.artifacts ?? [], artifactDigests: captureArtifactDigests(response.artifacts ?? []), invocationId: prepared.invocationId, digest: digest(response.output) };
         run.nodeStates[nodeId] = "succeeded"; this.activateObservations(run, nodeId, "succeeded");
         this.save(run); this.store.event(id, "adaptive.invocation.completed", { nodeId, invocationId: prepared.invocationId, outputDigest: digest(response.output) });
       });
@@ -670,6 +711,9 @@ export class AdaptiveEngine {
       const decision = DecisionInput.parse(await this.planner.evaluate(context));
       this.store.transaction(() => {
         const run = this.get(id);
+        if (!["queued","running","waiting"].includes(run.status) || run.stopRequested) {
+          run.observationStates[checkpointId] = "waiting"; this.save(run); return;
+        }
         run.decisions[checkpointId] = decision;
         run.observationStates[checkpointId] = "completed";
         if (decision.decision === "WAIT_INPUT" || decision.decision === "WAIT_APPROVAL" || decision.decision === "REPLAN" ||
@@ -680,12 +724,13 @@ export class AdaptiveEngine {
         }
         this.save(run); this.store.event(id, "adaptive.observation.decided", { checkpointId, decision });
       });
+      if (this.get(id).stopRequested) return;
       if (decision.decision === "REPLAN") await this.replan(id, checkpointId);
       if (decision.decision === "RETRY") this.retry(id, decision.affectedNodeIds[0] ?? context.checkpoint.afterNode);
     } catch (error) {
       this.store.transaction(() => {
         const run = this.get(id);
-        if (!["running", "completed"].includes(run.observationStates[checkpointId])) return;
+        if (run.stopRequested || !["running", "completed"].includes(run.observationStates[checkpointId])) return;
         // A failed replan after a persisted REPLAN decision must remain actionable.
         if (run.observationStates[checkpointId] === "running")
           run.observationStates[checkpointId] = "waiting";
@@ -711,9 +756,9 @@ export class AdaptiveEngine {
   }
   async replan(id: string, checkpointId: string): Promise<AdaptiveRun> {
     const before = this.get(id), decision = before.decisions[checkpointId];
+    if (before.stopRequested || before.status !== "waiting") throw new DomainError("replan_not_waiting","运行已停止或不在等待重规划状态",409);
     if (!decision || decision.decision !== "REPLAN") throw new DomainError("replan_not_requested", "没有有效重规划决策", 422);
     if (!this.planner) throw new DomainError("planner_unavailable", "未配置编排 Agent", 503);
-    if (before.status === "reconciling") throw new DomainError("recovery_required", "必须先核对未确认的执行副作用", 409);
     if (this.store.list<{runId:string;status:string;mcpIntentId?:string}>("adaptive_invocation")
         .some((i)=>i.runId===id && i.status==="waiting" && !!i.mcpIntentId))
       throw new DomainError("pending_mcp_approval","MCP 写入节点仍在等待审批，不能通过重规划绕过或删除它",409);
@@ -732,7 +777,7 @@ export class AdaptiveEngine {
       task.projectId, task.id);
     return this.store.transaction(() => {
       const run = this.get(id);
-      if (run.planRevision !== before.planRevision || Object.values(run.nodeStates).includes("running")) throw new DomainError("revision_conflict", "运行状态发生变化");
+      if (run.stopRequested || run.status !== "waiting" || run.planRevision !== before.planRevision || Object.values(run.nodeStates).includes("running")) throw new DomainError("revision_conflict", "运行状态发生变化");
       const oldNodes = byId(run.plan.nodes), states: AdaptiveRun["nodeStates"] = {}, results: AdaptiveRun["results"] = {};
       const nextSnapshots: AdaptiveRun["snapshots"] = {};
       for (const node of plan.nodes) {
@@ -789,9 +834,14 @@ export class AdaptiveEngine {
   retry(id: string, nodeId: string) {
     return this.store.transaction(() => {
       const run = this.get(id);
-      if (run.status === "reconciling" ||
-          Object.values(run.nodeStates).includes("uncertain"))
+      if (run.status === "reconciling" || Object.values(run.nodeStates).includes("uncertain"))
         throw new DomainError("recovery_required", "仍有未核对的能力副作用", 409);
+      if (!["failed","waiting"].includes(run.status) || run.stopRequested)
+        throw new DomainError("retry_terminal", "该运行状态不允许重试");
+      const task = this.assertOwnership(run);
+      if (["done","cancelled","awaiting_acceptance"].includes(task.status))
+        throw new DomainError("task_closed", "任务已结束或等待验收");
+      this.assertTaskReady(task);
       if (!["failed", "waiting"].includes(run.nodeStates[nodeId])) throw new DomainError("retry_invalid", "节点当前无法重试", 422);
       if (Object.values(run.nodeStates).includes("running")) throw new DomainError("active_invocation", "仍有正在执行的能力");
       const attempts = this.store.list<{runId:string;nodeId:string}>("adaptive_invocation").filter((i)=>i.runId===id && i.nodeId===nodeId).length;
@@ -800,6 +850,8 @@ export class AdaptiveEngine {
       if (!cap || cap.sideEffect === "external-write" || cap.sideEffect === "workspace-write")
         throw new DomainError("side_effect_uncertain", "写入能力需要先核查副作用，不能自动重试", 422);
       run.nodeStates[nodeId] = "pending"; run.status = "running"; delete run.failures[nodeId];
+      this.store.put("task",{...task,status:"in_progress",updatedAt:new Date().toISOString()});
+      this.notify();
       this.save(run); this.store.event(id, "adaptive.invocation.retry_requested", { nodeId });
       return run;
     });
@@ -817,7 +869,10 @@ export class AdaptiveEngine {
       if (!canResolve)
         throw new DomainError("not_waiting", "观察点并非等待人工审批；REPLAN 必须完成安全重编排", 422);
       run.decisions[checkpointId] = decision; run.observationStates[checkpointId] = "completed";
+      this.assertOwnership(run);
       run.status = decision.decision === "STOP" ? "failed" : "running";
+      if (decision.decision === "STOP") this.setTaskStatus(run.taskId,"planned");
+      this.notify();
       this.save(run); this.store.event(id, "adaptive.observation.manually_resolved", { checkpointId, decision }, "user");
       return run;
     });
@@ -825,7 +880,7 @@ export class AdaptiveEngine {
   completeManual(id: string, nodeId: string, output: unknown) {
     return this.store.transaction(() => {
       const run = this.get(id);
-      if (run.nodeStates[nodeId] !== "waiting")
+      if (run.status !== "waiting" || run.nodeStates[nodeId] !== "waiting")
         throw new DomainError("manual_not_waiting", "该节点未等待人工输入", 422);
       const cap = run.snapshots[nodeId]?.capability;
       const profile = this.assets.getProfile(run.snapshots[nodeId]?.profileRef ?? "");
@@ -840,7 +895,8 @@ export class AdaptiveEngine {
       run.nodeStates[nodeId] = "succeeded";
       run.results[nodeId] = { output, artifactRefs: [], invocationId: invocation.id, digest: digest(output) };
       this.activateObservations(run, nodeId, "succeeded");
-      run.status = "running"; this.save(run);
+      this.assertOwnership(run);
+      run.status = "running"; this.save(run); this.notify();
       this.store.event(id, "adaptive.invocation.manually_completed",
         { nodeId, invocationId: invocation.id, outputDigest: digest(output) }, "user");
       return run;
@@ -866,6 +922,11 @@ export class AdaptiveEngine {
             .includes(run.snapshots[key]?.capability.sideEffect ?? ""));
         run.status = writesHaveFailed ? "failed" : "waiting";
         if (writesHaveFailed) this.setTaskStatus(run.taskId, "planned");
+        if(run.stopRequested === "cancel") {
+          run.status="cancelled";this.setTaskStatus(run.taskId,"planned");
+        } else if(run.stopRequested === "pause" && !writesHaveFailed) {
+          run.status="paused";run.workspaceCheckpoint=this.inspectWorkspace(id).digest??undefined;
+        }
       }
       this.save(run);
       for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
@@ -886,17 +947,141 @@ export class AdaptiveEngine {
       const run = this.get(id);
       if (run.status !== "awaiting_acceptance") throw new DomainError("not_delivered", "尚未形成可验收交付", 422);
       if (!accepted && !reason.trim()) throw new DomainError("reason_required", "拒绝验收需说明原因", 422);
+      const task = this.assertOwnership(run);
+      if (accepted) {
+        this.assertTaskReady(task, true);
+        for (const result of Object.values(run.results)) verifyArtifacts(result);
+      }
       run.status = accepted ? "done" : "failed"; this.save(run);
-      const task = this.store.get<Task>("task", run.taskId)!;
       this.store.put("task", { ...task, status: accepted ? "done" : "planned", updatedAt: new Date().toISOString() });
       this.store.event(id, "adaptive.acceptance", { accepted, reason }, "user");
       return run;
     });
   }
+  inspectWorkspace(id:string, includeDigest=true) {
+    const run = this.get(id);
+    const workspace = this.store.get<{path:string;setupState?:string}>("adaptive_workspace",id);
+    return {runId:id,available:!!workspace,
+      digest:workspace && includeDigest ? workspaceDigest(workspace.path) : null,
+      setupState:workspace?.setupState ?? null,checkpoint:run.workspaceCheckpoint ?? null};
+  }
+  async stop(id:string, mode:"pause"|"cancel") {
+    const previous = this.get(id);
+    if (["done","cancelled","failed","reconciling","pausing","cancelling"].includes(previous.status))
+      throw new DomainError("stop_invalid","当前运行不能请求停止，请先核对现场或创建新版本",409);
+    this.assertOwnership(previous);
+    this.assertNoExternalInFlight(previous);
+    if (this.busy.has(id) && !this.control)
+      throw new DomainError("control_unavailable","运行控制器不可用，不能确认停止",503);
+    this.store.transaction(()=>{
+      const run=this.get(id); run.stopRequested=mode; run.status=mode==="pause"?"pausing":"cancelling";
+      this.save(run);this.store.event(id,"adaptive.stop.requested",{mode},"user");
+    });
+    try {
+      await this.control?.stop(id);
+      const deadline=Date.now()+20000;
+      while(this.busy.has(id) && Date.now()<deadline)
+        await new Promise((resolve)=>setTimeout(resolve,25));
+      if(this.busy.has(id))throw new DomainError("stop_unconfirmed","调用尚未结束，必须核对现场",409);
+      return this.store.transaction(()=>{
+        const run=this.get(id);
+        for(const [key,state] of Object.entries(run.observationStates))if(state==="running")run.observationStates[key]="waiting";
+        if(Object.values(run.nodeStates).some((s)=>["running","uncertain"].includes(s))) {
+          run.status="reconciling";
+        } else {
+          run.status=mode==="pause"?"paused":"cancelled";
+          run.workspaceCheckpoint=this.inspectWorkspace(id).digest ?? undefined;
+          if(mode==="cancel")this.setTaskStatus(run.taskId,"planned");
+        }
+        this.save(run);this.store.event(id,"adaptive.stop.settled",{mode,status:run.status});return run;
+      });
+    } catch(error) {
+      this.store.transaction(()=>{
+        const run=this.get(id);run.status="reconciling";
+        for(const [node,state] of Object.entries(run.nodeStates))if(state==="running")run.nodeStates[node]="uncertain";
+        this.save(run);this.store.event(id,"adaptive.stop.unconfirmed",{reason:String(error).slice(0,1000)});
+      });
+      throw error;
+    }
+  }
+  resume(id:string) {
+    return this.store.transaction(()=>{
+      const run=this.get(id);
+      if(run.status!=="paused")throw new DomainError("not_paused","运行尚未安全暂停",409);
+      this.assertTaskReady(this.assertOwnership(run));
+      const current=this.inspectWorkspace(id).digest;
+      if(current && current!==run.workspaceCheckpoint)
+        throw new DomainError("workspace_changed","暂停后工作区已改变，请人工核对并接纳现场",409);
+      for(const [node,state] of Object.entries(run.nodeStates)) {
+        if(state!=="failed")continue;
+        if(["workspace-write","external-write"].includes(run.snapshots[node].capability.sideEffect))
+          throw new DomainError("write_recovery_required","中断写入必须人工接纳现场，不能自动重放",409);
+        run.nodeStates[node]="pending";delete run.failures[node];
+      }
+      delete run.stopRequested;
+      run.status=Object.values(run.nodeStates).includes("waiting") ||
+        Object.values(run.observationStates).includes("waiting") ? "waiting":"running";
+      this.control?.resume(id);this.save(run);this.notify();
+      this.store.event(id,"adaptive.run.resumed",{},"user");return run;
+    });
+  }
+  adoptWorkspace(id:string, expectedDigest:string, note:string) {
+    return this.store.transaction(()=>{
+      const run=this.get(id);
+      if(!["failed","paused"].includes(run.status) || this.busy.has(id))
+        throw new DomainError("recovery_not_ready","必须先停止执行并逐项核对不确定调用",409);
+      const task=this.assertOwnership(run);this.assertTaskReady(task);
+      if(["done","cancelled","awaiting_acceptance"].includes(task.status))
+        throw new DomainError("task_closed","任务已结束或等待验收",409);
+      if(note.trim().length<20)throw new DomainError("recovery_note","请填写至少20字的工作区与进程核对依据",422);
+      const workspace=this.store.get<{id:string;path:string}>("adaptive_workspace",id);
+      if(!workspace || workspaceDigest(workspace.path)!==expectedDigest)
+        throw new DomainError("workspace_changed","工作区不存在或核对后已改变，请重新检查",409);
+      const uncertain=this.store.list<any>("adaptive_invocation").filter((i)=>i.runId===id && ["running","uncertain"].includes(i.status));
+      if(uncertain.length || Object.values(run.nodeStates).some((s)=>["running","uncertain","waiting"].includes(s)))
+        throw new DomainError("recovery_required","仍有未核对的调用或外部审批",409);
+      for(const [node,state] of Object.entries(run.nodeStates)) {
+        const cap=run.snapshots[node].capability;
+        if(cap.sideEffect==="external-write" && state!=="succeeded")
+          throw new DomainError("external_recovery_denied","不确定的外部写入不能凭工作区恢复",409);
+        if(["workspace-write","external-write"].includes(cap.sideEffect)) {
+          if(state!=="failed")continue;
+          const proof=this.store.list<any>("adaptive_invocation").find((i)=>i.runId===id && i.nodeId===node && i.status==="reconciled");
+          if(!proof)throw new DomainError("recovery_proof_required","写入中断尚未完成逐项人工核对",409);
+          const output={summary:"Workspace changes explicitly adopted by user; interrupted Agent result is not asserted successful",
+            evidence:["workspace-sha256:"+expectedDigest,"user-review:"+note],risks:[]};
+          checkSchema(cap.outputSchema,output);
+          const invocationId=randomUUID();
+          this.store.put("adaptive_invocation",{id:invocationId,runId:id,nodeId:node,planRevision:run.planRevision+1,
+            profileRef:run.snapshots[node].profileRef,status:"succeeded",actor:"user",kind:"workspace-adoption",
+            inputDigest:proof.inputDigest,outputDigest:digest(output),startedAt:new Date().toISOString()});
+          run.results[node]={output,artifactRefs:[],invocationId,digest:digest(output)};
+          run.nodeStates[node]="succeeded";
+        } else {
+          run.nodeStates[node]="pending";delete run.results[node];
+        }
+      }
+      this.store.put("adaptive_plan_revision",{id:id+":"+run.planRevision,runId:id,number:run.planRevision,
+        plan:run.plan,states:this.get(id).nodeStates,results:this.get(id).results,reason:"Before user workspace adoption"});
+      run.planRevision++;run.revisionCount++;run.observationStates={};run.decisions={};run.failures={};
+      delete run.stopRequested;run.status="running";run.workspaceCheckpoint=expectedDigest;
+      this.store.put("adaptive_workspace",{...workspace,setupState:"complete"});
+      this.store.put("task",{...task,status:"in_progress",updatedAt:new Date().toISOString()});
+      this.store.put("adaptive_plan_revision",{id:id+":"+run.planRevision,runId:id,number:run.planRevision,
+        plan:run.plan,digest:digest(run.plan),reason:"User adopted inspected workspace; revalidate read/test/review nodes"});
+      this.control?.resume(id);this.save(run);this.notify();
+      this.store.event(id,"adaptive.workspace.adopted",{expectedDigest,note,planRevision:run.planRevision},"user");return run;
+    });
+  }
   cancel(id: string) {
     return this.store.transaction(() => {
       const run = this.get(id);
-      if (Object.values(run.nodeStates).includes("running") || Object.values(run.nodeStates).includes("uncertain"))
+      if (run.status === "cancelled") return run;
+      if (["done","pausing","cancelling"].includes(run.status))
+        throw new DomainError("terminal_run", "已结束或正在停止的运行不能取消");
+      this.assertOwnership(run);
+      this.assertNoExternalInFlight(run);
+      if (this.busy.has(id) || Object.values(run.nodeStates).includes("running") || Object.values(run.nodeStates).includes("uncertain"))
         throw new DomainError("unsafe_cancel", "执行器未确认停止，无法直接释放工作流", 409);
       run.status = "cancelled"; this.save(run);
       const task = this.store.get<Task>("task", run.taskId);

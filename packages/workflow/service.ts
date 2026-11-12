@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
@@ -94,6 +95,27 @@ export class WorkService {
     };
     this.store.put("project", project);
     return project;
+  }
+  configureProject(id:string,input:unknown):Project {
+    return this.store.transaction(()=>{
+      const project=this.required<Project>("project",id);
+      const tasks=new Set(this.store.list<Task>("task").filter((t)=>t.projectId===id).map((t)=>t.id));
+      if(this.store.list<{taskId:string;status:string}>("run").some((r)=>tasks.has(r.taskId)&&!terminal.has(r.status)) ||
+         this.store.list<{taskId:string;status:string}>("adaptive_run").some((r)=>tasks.has(r.taskId)&&!["done","failed","cancelled"].includes(r.status)))
+        throw new DomainError("project_active","项目存在活跃运行，请先结束运行再修改执行配置",409);
+      const clearable=z.object({testCommand:z.unknown().optional(),setupCommand:z.unknown().optional()}).passthrough().parse(input);
+      const normalized={...clearable};
+      for(const key of ["testCommand","setupCommand"])if(normalized[key]===null)delete normalized[key];
+      const changes=ProjectInput.pick({allowAgent:true,testCommand:true,setupCommand:true,authorizedCommands:true}).partial().strict().parse(normalized);
+      for (const key of Object.keys(changes) as (keyof typeof changes)[])
+        if (!Object.hasOwn(normalized,key)) delete changes[key];
+      const updated={...project,...changes};
+      if(clearable.testCommand===null)delete updated.testCommand;
+      if(clearable.setupCommand===null)delete updated.setupCommand;
+      this.store.put("project",updated);
+      this.store.event("project:"+id,"project.runtime_configured",{configurationDigest:digest(changes)},"user");
+      return updated;
+    });
   }
   updateTask(id: string, revision: number, input: unknown): Task {
     return this.store.transaction(() => {
