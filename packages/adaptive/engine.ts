@@ -99,6 +99,8 @@ export class AdaptiveEngine {
     const capabilities = new Map<string, Capability>();
     for (const node of sorted) {
       const cap = this.assets.getCapability(node.capabilityRef);
+      if(cap.tags.includes("platform-builder"))
+        throw new DomainError("builder_platform_only","Capability Builder 只通过受控构建 API 调用，不能作为普通 DAG 节点",422);
       if (cap.projectId && cap.projectId !== projectId)
         throw new DomainError("capability_scope", "能力不属于当前项目", 403);
       capabilities.set(node.id, cap);
@@ -219,7 +221,7 @@ export class AdaptiveEngine {
     if (!this.planner) throw new DomainError("planner_unavailable", "尚未配置编排 Agent，仍可提交手动工作流", 503);
     const task = this.store.get<Task>("task", taskId);
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
-    const catalog = this.assets.listCapabilities().filter((c) => c.status === "published" && (!c.projectId || c.projectId === task.projectId));
+    const catalog = this.assets.listCapabilities().filter((c) => c.status === "published" && !c.tags.includes("platform-builder") && (!c.projectId || c.projectId === task.projectId));
     const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, "workflow.planner");
     try {
       const proposal = await this.planner.compose(task, catalog, knowledge);
@@ -718,7 +720,7 @@ export class AdaptiveEngine {
     if (before.revisionCount >= 5) throw new DomainError("replan_limit", "已达到重规划上限", 422);
     if (Object.values(before.nodeStates).includes("running")) throw new DomainError("active_invocation", "执行中节点不能热替换", 409);
     const task = this.store.get<Task>("task", before.taskId)!;
-    const candidates = this.assets.listCapabilities().filter((c) => c.status === "published" && (!c.projectId || c.projectId === task.projectId));
+    const candidates = this.assets.listCapabilities().filter((c) => c.status === "published" && !c.tags.includes("platform-builder") && (!c.projectId || c.projectId === task.projectId));
     const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, "workflow.planner");
     const proposal = await this.planner.compose(task, candidates, knowledge, before);
     // Keep the selected execution backend on platform core nodes when the planner
