@@ -108,7 +108,8 @@ export function isolatedOpenCodeHome(config:unknown,opts?:{
   }catch(error){rmSync(dir,{recursive:true,force:true});throw error;}
 }
 
-export function parseOpenCodeEvents(stdout:string,schema:Record<string,unknown>):OpenCodeResult {
+export function parseOpenCodeEvents(stdout:string,schema:Record<string,unknown>,
+  validateOutput?:(value:unknown)=>void):OpenCodeResult {
   let answer="",input=0,output=0,hasUsage=false,events=0;
   const tools:OpenCodeResult["tools"]=[];
   for(const line of stdout.split(/\r?\n/)) {
@@ -148,7 +149,8 @@ export function parseOpenCodeEvents(stdout:string,schema:Record<string,unknown>)
   try{value=JSON.parse(raw);}catch{
     throw new DomainError("opencode_invalid_json","OpenCode 未按契约返回 JSON 对象",502);
   }
-  checkSchema(schema,value);
+  if(validateOutput)validateOutput(value);
+  else checkSchema(schema,value);
   return {output:value,modelUsage:hasUsage?{inputTokens:input,outputTokens:output}:undefined,
     tools,eventLog:stdout};
 }
@@ -158,6 +160,7 @@ export async function runOpenCode(options:{
   model?:string;prompt:string;schema:Record<string,unknown>;
   mcp:OpenCodeMcp;deadline:number;cgroup?:CgroupLimits;
   onChild:(child:ChildProcess|null)=>void;authFile?:string;
+  validateOutput?:(value:unknown)=>void;
 }):Promise<OpenCodeResult> {
   assertOpenCodeWorkspaceSafe(options.cwd);
   const isolated=isolatedOpenCodeHome(renderOpenCodeConfig(options.mode,options.mcp),
@@ -175,7 +178,7 @@ export async function runOpenCode(options:{
     if(result.code!==0)
       throw new DomainError("opencode_failed",
         "OpenCode 执行失败（隐藏可能包含敏感信息的 stderr），退出码："+result.code,502);
-    return parseOpenCodeEvents(result.stdout,options.schema);
+    return parseOpenCodeEvents(result.stdout,options.schema,options.validateOutput);
   }finally{isolated.dispose();}
 }
 
