@@ -88,6 +88,7 @@ export class AdaptiveRuntime {
           model:process.env.AI_WORK_OS_OPENCODE_MODEL,
           prompt,schema:strict(schema),mcp:[],deadline,
           cgroup:this.containment(),onChild:this.child,
+          validateOutput:(value)=>{parse(value);},
         });
         const verified = parse(reply.output);
         this.store.event(auditId,"adaptive.brain.completed",{
