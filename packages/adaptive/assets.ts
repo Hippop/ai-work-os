@@ -12,7 +12,7 @@ export const ExecutionProfileInput = z.object({
   name: key, version,
   projectId: z.string().uuid().nullable().default(null),
   executor: z.enum(["agent", "program", "project-test", "manual", "builtin"]),
-  agent: z.string().max(80).optional(),
+  agent: z.enum(["codex", "opencode"]).optional(),
   model: z.string().max(150).optional(),
   skillIds: z.array(z.string().uuid()).max(20).default([]),
   mcpGrants: z.array(z.object({
