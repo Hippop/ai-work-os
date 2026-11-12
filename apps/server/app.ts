@@ -1,5 +1,5 @@
 import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
-import { AssetService } from "../../packages/adaptive/assets.js";
+import { AssetService, checkSchema } from "../../packages/adaptive/assets.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
@@ -482,6 +482,15 @@ export function createApp(
     const session=capabilityBuilder.get(req.params.id);
     res.json({...session,materials:session.materials.map(({kind,label,digest,source})=>
       ({kind,label,digest,source}))});
+  });
+  app.post("/api/v2/capability-builder/sessions/:id/check-sample", (req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    const session=capabilityBuilder.get(req.params.id);
+    const cap=new AssetService(store).getCapability(session.capabilityId,false);
+    checkSchema(cap.inputSchema,session.proposal.sampleInput);
+    checkSchema(cap.outputSchema,session.proposal.sampleOutput);
+    res.json({passed:true,kind:"schema-only",actualExecution:false,
+      capabilityId:cap.id,revision:session.revisions.length});
   });
   app.post("/api/v2/capability-builder/sessions/:id/revise", async (req,res) => {
     if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
