@@ -3,6 +3,7 @@ import { Store } from "../persistence/index.js";
 import { AssetService, type Capability, type Profile } from "./assets.js";
 import type { Plan } from "./engine.js";
 import { selectCoreAgent, type AgentBackend } from "./agent-selection.js";
+import { bootstrapCapabilityBuilder } from "./builder.js";
 
 const objectiveInput = {
   type: "object", additionalProperties: false, required: ["objective"],
@@ -65,6 +66,7 @@ export function bootstrapAdaptiveAssets(store: Store) {
       assets.publishCapability(cap.id);
     }
   }
+  bootstrapCapabilityBuilder(store);
 }
 
 /** Clearly labeled deterministic template, never misrepresented as AI composition. */
