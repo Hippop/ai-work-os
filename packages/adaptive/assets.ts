@@ -11,8 +11,13 @@ const shape = z.record(z.string(), z.unknown());
 export const ExecutionProfileInput = z.object({
   name: key, version,
   projectId: z.string().uuid().nullable().default(null),
-  executor: z.enum(["agent", "program", "project-test", "manual", "builtin"]),
+  executor: z.enum(["agent", "program", "project-test", "manual", "builtin", "mcp-write"]),
   agent: z.enum(["codex", "opencode"]).optional(),
+  mcpWrite: z.object({
+    server: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+    tool: z.string().regex(/^[a-zA-Z][\w.-]{0,119}$/),
+    purpose: z.string().trim().min(10).max(2000),
+  }).strict().optional(),
   model: z.string().max(150).optional(),
   skillIds: z.array(z.string().uuid()).max(20).default([]),
   mcpGrants: z.array(z.object({
@@ -151,6 +156,18 @@ export class AssetService {
       throw new DomainError("project_not_found", "执行配置绑定的项目不存在", 422);
     if (data.executor === "program" && !data.program) throw new DomainError("program_required", "程序执行器需要显式程序及参数", 422);
     if (data.executor === "agent" && !data.agent) throw new DomainError("agent_required", "Agent执行器需要指定适配器", 422);
+    if (data.executor === "mcp-write") {
+      if (!data.mcpWrite || data.mcpGrants.length || data.workspaceMode !== "none")
+        throw new DomainError("mcp_write_profile_invalid","MCP 写入配置必须指定唯一工具，禁止继承 Agent grants 和工作区权限",422);
+      const server = new McpRegistry(this.store).get(data.mcpWrite.server);
+      if (server.projectId && server.projectId !== data.projectId)
+        throw new DomainError("mcp_scope_denied","MCP 写操作配置必须属于授权项目",403);
+      if (!server.exposedTools.includes(data.mcpWrite.tool) ||
+          server.readOnlyTools.includes(data.mcpWrite.tool))
+        throw new DomainError("mcp_write_tool_invalid","指定工具不是已发布的写操作",422);
+    }
+    if (data.executor !== "mcp-write" && data.mcpWrite)
+      throw new DomainError("mcp_write_profile_invalid","普通执行器不得携带 MCP 写操作配置",422);
     const profile: Profile = { ...data, id, status: "draft", createdAt: new Date().toISOString() };
     this.store.transaction(() => { this.store.put("adaptive_profile", profile); this.record("profile", id, "profile.created", { profile }); });
     return profile;
@@ -160,6 +177,15 @@ export class AssetService {
       const p = this.getProfile(id, false);
       for (const skill of p.skillIds) new ExternalSkillService(this.store).snapshot([skill]);
       if (p.mcpGrants.length) new McpRegistry(this.store).resolve(p.mcpGrants, p.projectId);
+      if (p.executor === "mcp-write") {
+        if (!p.mcpWrite) throw new DomainError("mcp_write_profile_invalid","MCP 写入配置不完整",422);
+        const server = new McpRegistry(this.store).get(p.mcpWrite.server);
+        if (server.projectId && server.projectId !== p.projectId)
+          throw new DomainError("mcp_scope_denied","MCP 写入配置项目不匹配",403);
+        if (!server.exposedTools.includes(p.mcpWrite.tool) ||
+            server.readOnlyTools.includes(p.mcpWrite.tool))
+          throw new DomainError("mcp_write_tool_invalid","MCP 写入工具未获授权",422);
+      }
       const v = { ...p, status: "published" as const };
       this.store.put("adaptive_profile", v); this.record("profile", id, "profile.published", { id });
       return v;
