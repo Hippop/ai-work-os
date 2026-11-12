@@ -31,6 +31,11 @@ test("mock OpenCode CLI builds and revises atomic candidates from imported mater
     sampleInput:{objective:"Inspect specification"},sampleOutput:{summary:"Specification inspected"},
     questions:[],rationale:"One bounded task can be modeled as a read-only atomic operation.",
   };
+  const {inputSchema,outputSchema,sampleInput,sampleOutput,...rest}=result;
+  const modelReply={
+    ...rest,inputSchemaJson:JSON.stringify(inputSchema),outputSchemaJson:JSON.stringify(outputSchema),
+    sampleInputJson:JSON.stringify(sampleInput),sampleOutputJson:JSON.stringify(sampleOutput),
+  };
   writeFileSync(bin,[
     "#!/usr/bin/env node",
     'const a=process.argv.slice(2);',
@@ -39,7 +44,7 @@ test("mock OpenCode CLI builds and revises atomic candidates from imported mater
     'if(config.default_agent!=="aiwork_read")process.exit(32);',
     'const request=a.at(-1);',
     'if(!request.includes("Project specification as reference material"))process.exit(33);',
-    'const result='+JSON.stringify(result)+';',
+    'const result='+JSON.stringify(modelReply)+';',
     'console.log(JSON.stringify({type:"text",part:{text:JSON.stringify(result)}}));',
     'console.log(JSON.stringify({type:"step_finish",part:{tokens:{input:45,output:20}}}));',
   ].join("\n"),{mode:0o700});
