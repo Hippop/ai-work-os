@@ -6,6 +6,7 @@ import { AssetService, checkSchema, type Capability, type Profile } from "./asse
 import { ExternalSkillService } from "../external-skills/index.js";
 import { McpRegistry } from "./mcp.js";
 import type { WriteIntent } from "./mcp-write.js";
+import { selectCoreAgent, type AgentBackend } from "./agent-selection.js";
 
 const nodeId = z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/);
 export const PlanNodeInput = z.object({
@@ -214,7 +215,7 @@ export class AdaptiveEngine {
     }
     return { ...plan, nodes: sorted };
   }
-  async compose(taskId: string) {
+  async compose(taskId: string, executionAgent: AgentBackend = "codex") {
     if (!this.planner) throw new DomainError("planner_unavailable", "尚未配置编排 Agent，仍可提交手动工作流", 503);
     const task = this.store.get<Task>("task", taskId);
     if (!task) throw new DomainError("task_missing", "任务不存在", 404);
@@ -222,7 +223,7 @@ export class AdaptiveEngine {
     const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, "workflow.planner");
     try {
       const proposal = await this.planner.compose(task, catalog, knowledge);
-      const plan = this.validate(proposal, task.projectId, task.id);
+      const plan = this.validate(selectCoreAgent(proposal,executionAgent), task.projectId, task.id);
       this.store.event("task:" + task.id, "adaptive.plan.proposed", {
         planDigest: digest(plan), capabilityRefs: plan.nodes.map((n) => n.capabilityRef),
         observationIds: plan.observations.map((o) => o.id),
