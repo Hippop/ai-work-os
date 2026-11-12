@@ -52,6 +52,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
   const [profileAgent, setProfileAgent] = useState("codex");
+  const [executionAgent, setExecutionAgent] = useState("codex");
   async function load() {
     const [c,p,k,s,sk,r,mcp,stats,bind,datasets,evaluations] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
@@ -519,14 +520,20 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
           {tasks.map((t) => <option key={t.id} value={t.id}>{t.title}（{t.type}）</option>)}
         </select>
       </label>
+      <label>核心原子能力的 Agent 执行后端
+        <select value={executionAgent} onChange={(e)=>setExecutionAgent(e.target.value)}>
+          <option value="codex">Codex</option>
+          <option value="opencode">OpenCode</option>
+        </select>
+      </label>
       <div className="actions">
         <button disabled={!taskId} onClick={() => void act(async () => {
-          const result = await api("/v2/tasks/" + taskId + "/compose", {});
-          setPlan(json(result.plan)); setNotice("Planner 已生成工作流，请检查 DAG 和观察策略后下发");
-        })}>使用 Codex 智能编排</button>
+          const result = await api("/v2/tasks/" + taskId + "/compose", {executionAgent});
+          setPlan(json(result.plan)); setNotice("Planner 已生成工作流，核心节点将使用 "+executionAgent+"；请检查 DAG 和观察策略后下发");
+        })}>使用 AI 智能编排（规划模型由服务端配置）</button>
         <button disabled={!taskId} className="quiet" onClick={() => void act(async () => {
-          const result = await api("/v2/tasks/" + taskId + "/standard-plan", {});
-          setPlan(json(result.plan)); setNotice("已生成平台标准工作流（非 AI 编排），请确认后执行");
+          const result = await api("/v2/tasks/" + taskId + "/standard-plan", {executionAgent});
+          setPlan(json(result.plan)); setNotice("已生成 "+executionAgent+" 平台标准工作流（非 AI 编排），请确认后执行");
         })}>使用标准流程</button>
         <button className="quiet" onClick={makeSample}>根据已发布能力生成编辑示例</button>
       </div>
