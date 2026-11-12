@@ -297,7 +297,7 @@ export class AdaptiveRuntime {
         reserved = record !== null;
         let output: unknown;
         let modelUsage: { inputTokens?: number; outputTokens?: number } | undefined;
-        let tools: { kind:string; name:string; inputDigest?:string; outputDigest?:string }[] = [];
+        let tools: { kind:string; name:string; inputDigest?:string|null; outputDigest?:string|null }[] = [];
         if (profile.agent === "opencode") {
           const reply = await runOpenCode({
             cwd:workingDirectory,mode:profile.workspaceMode==="worktree-write"?"worktree-write":"read-only",
