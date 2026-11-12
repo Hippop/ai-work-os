@@ -5,7 +5,7 @@ type API = (path: string, data?: unknown, headers?: Record<string, string>) => P
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
 type Binding = {id:string;capabilityName:string;knowledgeRef:string;mode:string;status?:string};
-type Profile = Item & { executor: string; projectId?: string | null; mcpGrants?: {server:string;actions:string[]}[] };
+type Profile = Item & { executor: string; agent?: string; model?:string; projectId?: string | null; mcpGrants?: {server:string;actions:string[]}[] };
 type McpServer = { id: string; name: string; description: string; status: string; exposedTools: string[]; readOnlyTools: string[] };
 type Source = { id: string; path: string; lastScannedAt: string | null };
 type Skill = { id: string; name: string; relativePath: string; status: string; description: string; contentDigest: string };
@@ -51,6 +51,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
   const [knowledgeScope, setKnowledgeScope] = useState("global");
   const [capProfile, setCapProfile] = useState("");
   const [profileExecutor, setProfileExecutor] = useState("agent");
+  const [profileAgent, setProfileAgent] = useState("codex");
   async function load() {
     const [c,p,k,s,sk,r,mcp,stats,bind,datasets,evaluations] = await Promise.all([
       api("/v2/capabilities"), api("/v2/profiles"), api("/v2/knowledge"),
@@ -204,7 +205,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       <h2>Execution Profile · 执行配置</h2>
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/profiles", {
         name: f.get("name"), version: f.get("version"), executor: f.get("executor"),
-        agent: f.get("executor") === "agent" ? "codex" : undefined,
+        agent: f.get("executor") === "agent" ? f.get("agent") : undefined,
         model: f.get("model") || undefined,
         projectId: f.get("projectId") || null,
         mcpGrants: JSON.parse(String(f.get("mcpGrants") || "[]")),
@@ -227,7 +228,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         <div className="form-row">
           <label>执行器
             <select name="executor" value={profileExecutor} onChange={(e)=>setProfileExecutor(e.target.value)}>
-              <option value="agent">Codex Agent</option><option value="program">项目授权程序</option>
+              <option value="agent">AI Agent（Codex / OpenCode）</option><option value="program">项目授权程序</option>
               <option value="manual">人工输入</option><option value="builtin">平台内置</option>
             </select>
           </label>
@@ -237,7 +238,18 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
             </select>
           </label>
         </div>
-        {profileExecutor === "agent" && <label>模型（可留空使用默认）<input name="model" /></label>}
+        {profileExecutor === "agent" && <>
+          <label>Agent 适配器
+            <select name="agent" value={profileAgent} onChange={(e)=>setProfileAgent(e.target.value)}>
+              <option value="codex">Codex CLI</option>
+              <option value="opencode">OpenCode CLI</option>
+            </select>
+          </label>
+          <label>模型（可留空使用适配器默认值；OpenCode 请使用 provider/model）
+            <input name="model" placeholder={profileAgent==="opencode"?"anthropic/claude-sonnet-5-5":""}/>
+          </label>
+          {profileAgent==="opencode" && <p>OpenCode 使用 JSONL CLI 和独立 XDG 配置；工作区存在 opencode.json、opencode.jsonc 或 .opencode 插件目录时拒绝执行，以防继承非授权工具。</p>}
+        </>}
         <label>工作目录（相对项目/隔离 Worktree 的目录，不允许跨出根目录）
           <input name="workspaceSubdir" defaultValue="." placeholder="src/backend" required />
         </label>
@@ -277,7 +289,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
         <button>创建执行配置草稿</button>
       </form>
       {profiles.map((p) => <div className="project" key={p.id}>
-        <b>{p.id}</b> · {p.executor} · {p.status}
+        <b>{p.id}</b> · {p.executor} {p.agent ? "/ "+p.agent : ""} · {p.status}
         {p.status === "draft" && <button className="quiet" onClick={() => void act(async () => {
           await api("/v2/profiles/" + encodeURIComponent(p.id) + "/publish", {}); await load();
         })}>发布配置</button>}
