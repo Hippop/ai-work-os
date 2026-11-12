@@ -16,7 +16,8 @@ test("shipped standard plan includes two observation barriers and mandatory code
     bootstrapAdaptiveAssets(store);
     bootstrapAdaptiveAssets(store); // idempotent, no duplicate versions
     const assets = new AssetService(store);
-    assert.equal(assets.listCapabilities().length, 10);
+    assert.equal(assets.listCapabilities().filter((c)=>!c.tags.includes("platform-builder")).length, 10);
+    assert.equal(assets.getCapability("core.capability.builder@1.0.0").status, "published");
     const task = new WorkService(store).createTask({
       title: "Add retry handling", objective: "Implement request retry handling",
       type: "development", acceptanceCriteria: ["All tests pass"],
