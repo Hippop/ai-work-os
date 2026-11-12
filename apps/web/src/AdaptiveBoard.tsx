@@ -206,10 +206,13 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
       <form onSubmit={(e) => doForm(e, async (f) => api("/v2/profiles", {
         name: f.get("name"), version: f.get("version"), executor: f.get("executor"),
         agent: f.get("executor") === "agent" ? f.get("agent") : undefined,
+        mcpWrite: f.get("executor") === "mcp-write" ? {
+          server:f.get("writeServer"),tool:f.get("writeTool"),purpose:f.get("writePurpose"),
+        } : undefined,
         model: f.get("model") || undefined,
         projectId: f.get("projectId") || null,
         mcpGrants: JSON.parse(String(f.get("mcpGrants") || "[]")),
-        workspaceMode: f.get("workspaceMode"),
+        workspaceMode: f.get("executor") === "mcp-write" ? "none" : f.get("workspaceMode"),
         workspaceSubdir: f.get("workspaceSubdir") || ".",
         memoryLimitMb: Number(f.get("memoryLimitMb") || 2048),
         maxProcesses: Number(f.get("maxProcesses") || 128),
@@ -230,6 +233,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
             <select name="executor" value={profileExecutor} onChange={(e)=>setProfileExecutor(e.target.value)}>
               <option value="agent">AI Agent（Codex / OpenCode）</option><option value="program">项目授权程序</option>
               <option value="manual">人工输入</option><option value="builtin">平台内置</option>
+              <option value="mcp-write">MCP 写操作（逐节点审批）</option>
             </select>
           </label>
           <label>工作区权限
@@ -249,6 +253,24 @@ export function AdaptiveBoard({ api, act, token, tasks, projects }: {
             <input name="model" placeholder={profileAgent==="opencode"?"anthropic/claude-sonnet-5-5":""}/>
           </label>
           {profileAgent==="opencode" && <p>OpenCode 使用 JSONL CLI 和独立 XDG 配置；工作区存在 opencode.json、opencode.jsonc 或 .opencode 插件目录时拒绝执行，以防继承非授权工具。</p>}
+        </>}
+        {profileExecutor === "mcp-write" && <>
+          <label>已发布 MCP Server（仅显示有写工具的服务器）
+            <select name="writeServer" required>
+              <option value="">请选择</option>
+              {mcpServers.filter((m)=>m.status==="published" &&
+                m.exposedTools.some((t)=>!m.readOnlyTools.includes(t))).map((m)=>
+                <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+          <label>MCP 写工具名称（必须与服务器发布目录一致）
+            <input name="writeTool" required placeholder="update"/>
+          </label>
+          <label>每次调用所需的业务审批目的
+            <textarea name="writePurpose" required minLength={10} rows={3}
+              placeholder="Explain the exact external change that this workflow may request" />
+          </label>
+          <p>此类型不会赋予 Agent 写权限；节点执行时生成审批请求，并等待用户确认参数后单次执行。</p>
         </>}
         <label>工作目录（相对项目/隔离 Worktree 的目录，不允许跨出根目录）
           <input name="workspaceSubdir" defaultValue="." placeholder="src/backend" required />
