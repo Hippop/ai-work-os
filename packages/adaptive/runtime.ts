@@ -13,6 +13,7 @@ import { AssetService, CapabilityInput, type Capability } from "./assets.js";
 import { McpRegistry, isolatedCodexHome, renderMcpConfig } from "./mcp.js";
 import { BudgetService } from "./budget.js";
 import { summarizeCodexEvents } from "./telemetry.js";
+import { runOpenCode } from "./opencode.js";
 
 function strict(schema: any): any {
   if (Array.isArray(schema)) return schema.map(strict);
@@ -33,7 +34,9 @@ export class AdaptiveRuntime {
   private stopped = false;
   constructor(public store: Store, public dataDir: string,
     public codex = process.env.AI_WORK_OS_CODEX ?? "codex",
-    public model = process.env.AI_WORK_OS_CODEX_MODEL ?? undefined) {}
+    public model = process.env.AI_WORK_OS_CODEX_MODEL ?? undefined,
+    public plannerAgent: "codex" | "opencode" =
+      process.env.AI_WORK_OS_PLANNER_AGENT === "opencode" ? "opencode" : "codex") {}
   private child = (child: ChildProcess | null) => {
     if (child) this.children.add(child);
     else for (const item of this.children) if (item.exitCode !== null || item.signalCode !== null) this.children.delete(item);
@@ -54,7 +57,8 @@ export class AdaptiveRuntime {
       pidsMax:profile?.maxProcesses ?? 128,
     };
   }
-  private async json<T>(kind: string, task: Task, prompt: string, schema: unknown, parse: (value: unknown) => T): Promise<T> {
+  private async json<T>(kind: string, task: Task, prompt: string, schema: unknown,
+    parse: (value: unknown) => T, backend: "codex" | "opencode" = this.plannerAgent): Promise<T> {
     if (this.stopped) throw new DomainError("runtime_stopping", "执行器正在关闭", 503);
     const project = task.projectId ? this.store.get<Project>("project", task.projectId) : null;
     if (!project) throw new DomainError("project_required", "模型执行需要关联项目工作区", 422);
@@ -69,11 +73,36 @@ export class AdaptiveRuntime {
       "--sandbox", "read-only", "-C", workDir,
       "--output-schema", schemaFile, "-o", resultFile, prompt];
     const deadline = Date.now() + 5 * 60_000;
-    const isolated = isolatedCodexHome(renderMcpConfig([]));
     const auditId = "brain:" + task.id, startedAt = Date.now();
     this.store.event(auditId, "adaptive.brain.started", {
-      kind, promptDigest: digest(prompt), model: this.model ?? null,
+      kind, backend, promptDigest: digest(prompt),
+      model: backend === "codex" ? this.model ?? null :
+        process.env.AI_WORK_OS_OPENCODE_MODEL ?? null,
     });
+    if (backend === "opencode") {
+      try {
+        const reply = await runOpenCode({
+          cwd:workDir,mode:"read-only",
+          command:process.env.AI_WORK_OS_OPENCODE ?? "opencode",
+          model:process.env.AI_WORK_OS_OPENCODE_MODEL,
+          prompt,schema:strict(schema),mcp:[],deadline,
+          cgroup:this.containment(),onChild:this.child,
+        });
+        const verified = parse(reply.output);
+        this.store.event(auditId,"adaptive.brain.completed",{
+          kind,backend,resultDigest:digest(verified),durationMs:Date.now()-startedAt,
+          modelUsage:reply.modelUsage??null,
+          tools:reply.tools,
+        });
+        return verified;
+      }catch(error){
+        this.store.event(auditId,"adaptive.brain.failed",{
+          kind,backend,durationMs:Date.now()-startedAt,errorCode:(error as Error).name,
+        });
+        throw error;
+      }
+    }
+    const isolated = isolatedCodexHome(renderMcpConfig([]));
     try {
       const result = await execute(this.command(), args, workDir, deadline, this.child,
         { env: isolated.env, cgroup: this.containment() });
@@ -306,9 +335,9 @@ export class AdaptiveRuntime {
     if (!cap.profileRef)
       throw new DomainError("profile_required", "请先绑定已发布的只读 Agent 配置", 422);
     const profile = assets.getProfile(cap.profileRef);
-    if (profile.executor !== "agent" || profile.agent !== "codex" ||
+    if (profile.executor !== "agent" || !["codex","opencode"].includes(profile.agent ?? "") ||
         profile.workspaceMode !== "read-only" || profile.mcpGrants.length)
-      throw new DomainError("verification_profile_denied", "样例验证只支持无 MCP 写入权限的 Codex 只读 Profile", 422);
+      throw new DomainError("verification_profile_denied", "样例验证只支持无 MCP 写入权限的 Codex/OpenCode 只读 Profile", 422);
     const project = this.store.get<Project>("project", projectId);
     if (!project || !project.allowAgent)
       throw new DomainError("agent_not_authorized", "项目未授权 Agent", 403);
@@ -343,7 +372,8 @@ export class AdaptiveRuntime {
       "Report actual evidence. Do not claim a test was run if it was not.",
     ].join("\n");
     const output = await this.json("candidate-sample", task, prompt, cap.outputSchema,
-      (value) => { checkSchema(cap.outputSchema, value); return value; });
+      (value) => { checkSchema(cap.outputSchema, value); return value; },
+      profile.agent as "codex" | "opencode");
     const now = new Date().toISOString();
     const record = {
       id: randomUUID(), capabilityId: cap.id, projectId, status: "schema_passed",
