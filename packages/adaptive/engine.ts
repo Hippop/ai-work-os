@@ -711,6 +711,9 @@ export class AdaptiveEngine {
     if (!decision || decision.decision !== "REPLAN") throw new DomainError("replan_not_requested", "没有有效重规划决策", 422);
     if (!this.planner) throw new DomainError("planner_unavailable", "未配置编排 Agent", 503);
     if (before.status === "reconciling") throw new DomainError("recovery_required", "必须先核对未确认的执行副作用", 409);
+    if (this.store.list<{runId:string;status:string;mcpIntentId?:string}>("adaptive_invocation")
+        .some((i)=>i.runId===id && i.status==="waiting" && !!i.mcpIntentId))
+      throw new DomainError("pending_mcp_approval","MCP 写入节点仍在等待审批，不能通过重规划绕过或删除它",409);
     if (before.revisionCount >= 5) throw new DomainError("replan_limit", "已达到重规划上限", 422);
     if (Object.values(before.nodeStates).includes("running")) throw new DomainError("active_invocation", "执行中节点不能热替换", 409);
     const task = this.store.get<Task>("task", before.taskId)!;
