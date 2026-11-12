@@ -262,7 +262,8 @@ export class AdaptiveRuntime {
         writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
         return { output, artifacts: [join(folder, "result.json")] };
       }
-      if (profile.executor !== "agent" || profile.agent !== "codex") throw new DomainError("agent_unsupported", "不支持的 Agent 适配器", 422);
+      if (profile.executor !== "agent" || !["codex","opencode"].includes(profile.agent ?? ""))
+        throw new DomainError("agent_unsupported", "不支持的 Agent 适配器", 422);
       const skills = call.run.snapshots[call.node.id].skillInstructions;
       const before = workspaceDigest(workspace);
       const prompt = [
@@ -282,44 +283,60 @@ export class AdaptiveRuntime {
       ].join("\n");
       const job = {
         runId: call.run.id, epoch: randomUUID(), workspace: workingDirectory, outputDir: folder,
-        command: this.command(), commandPrefix: [], cgroup: this.containment(profile),
+        command: profile.agent === "codex" ? this.command() : "",
+        commandPrefix: [], cgroup: this.containment(profile),
         objective: call.task.objective,
         criteria: call.task.acceptanceCriteria, testCommand: project.testCommand ?? { executable:"true", args: [] },
         deadline, model: profile.model ?? this.model,
         context: { knowledge: call.knowledge.map((x) => ({ id:x.id, digest:x.digest })) },
       };
-      const isolated = isolatedCodexHome(renderMcpConfig(mcp));
       const budget = new BudgetService(this.store);
       let reserved = false;
       try {
         const record = budget.reserve(call.run.id,call.invocationId,profile,call.run.budgetUsd??null);
         reserved = record !== null;
-        const output = await runAgent({ ...job, env: isolated.env },
-          sanitizeName(call.node.id), prompt, this.child,
-          profile.workspaceMode === "worktree-write" ? "implement" : "analyze",
-          call.capability.outputSchema);
+        let output: unknown;
+        let modelUsage: { inputTokens?: number; outputTokens?: number } | undefined;
+        let tools: { kind:string; name:string; inputDigest?:string; outputDigest?:string }[] = [];
+        if (profile.agent === "opencode") {
+          const reply = await runOpenCode({
+            cwd:workingDirectory,mode:profile.workspaceMode==="worktree-write"?"worktree-write":"read-only",
+            model:profile.model ?? process.env.AI_WORK_OS_OPENCODE_MODEL,
+            command:process.env.AI_WORK_OS_OPENCODE ?? "opencode",
+            prompt,schema:call.capability.outputSchema,mcp,deadline,
+            cgroup:this.containment(profile),onChild:this.child,
+          });
+          output = reply.output;
+          modelUsage = reply.modelUsage;
+          tools = reply.tools;
+          writeFileSync(join(folder,sanitizeName(call.node.id)+".events.jsonl"),
+            reply.eventLog,{mode:0o600});
+        } else {
+          const isolated = isolatedCodexHome(renderMcpConfig(mcp));
+          try {
+            output = await runAgent({ ...job, env: isolated.env },
+              sanitizeName(call.node.id),prompt,this.child,
+              profile.workspaceMode === "worktree-write" ? "implement" : "analyze",
+              call.capability.outputSchema);
+            try {
+              const eventsFile=join(folder,sanitizeName(call.node.id)+".events.jsonl");
+              const report=summarizeCodexEvents(readFileSync(eventsFile,"utf8"));
+              modelUsage=report.usage;
+              tools=report.tools;
+            } catch { /* older Codex event formats may omit telemetry */ }
+          } finally { isolated.dispose(); }
+        }
         if (profile.workspaceMode !== "worktree-write" && workspaceDigest(workspace) !== before)
           throw new DomainError("readonly_violation", "只读能力更改了工作区", 422);
-        writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2));
-        let modelUsage: { inputTokens?: number; outputTokens?: number } | undefined;
-        try {
-          const eventsFile = join(folder, sanitizeName(call.node.id) + ".events.jsonl");
-          const report = summarizeCodexEvents(readFileSync(eventsFile, "utf8"));
-          modelUsage = report.usage;
-          for (const item of report.tools) this.store.event(call.run.id,
-            "adaptive.tool.observed", {
-              nodeId:call.node.id, invocationId:call.invocationId,
-              kind:item.kind, name:item.name,
-              inputDigest:item.inputDigest, outputDigest:item.outputDigest,
-            }, "agent");
-        } catch { /* old Codex event formats may omit optional telemetry */ }
-        if (reserved)
-          budget.settle(call.invocationId,modelUsage,profile,call.run.budgetUsd??null);
+        writeFileSync(join(folder, "result.json"), JSON.stringify(output, null, 2),{mode:0o600});
+        for(const item of tools) this.store.event(call.run.id,"adaptive.tool.observed",{
+          nodeId:call.node.id,invocationId:call.invocationId,
+          kind:item.kind,name:item.name,inputDigest:item.inputDigest,outputDigest:item.outputDigest,
+        },"agent");
+        if (reserved) budget.settle(call.invocationId,modelUsage,profile,call.run.budgetUsd??null);
         return { output, artifacts: [join(folder, "result.json")], modelUsage };
       } finally {
-        try {
-          if (reserved) budget.unverified(call.invocationId,"invocation_exit_without_verified_usage");
-        } finally { isolated.dispose(); }
+        if (reserved) budget.unverified(call.invocationId,"invocation_exit_without_verified_usage");
       }
     };
   }
