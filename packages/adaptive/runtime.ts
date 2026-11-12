@@ -15,7 +15,7 @@ import { BudgetService } from "./budget.js";
 import { summarizeCodexEvents } from "./telemetry.js";
 import { runOpenCode } from "./opencode.js";
 import { McpWriteService } from "./mcp-write.js";
-import { BuilderProposalInput, type BuilderAgent } from "./builder.js";
+import { BuilderModelOutput, parseBuilderModelOutput, type BuilderAgent } from "./builder.js";
 
 function strict(schema: any): any {
   if (Array.isArray(schema)) return schema.map(strict);
@@ -146,8 +146,8 @@ export class AdaptiveRuntime {
         resourceFamilyIds:[],parentId:null,goalId:null,dependsOn:[],
         plannedFor:null,dueAt:null,status:"planned",revision:1,createdAt:now,updatedAt:now,
       };
-      return this.json("capability-builder",task,prompt,z.toJSONSchema(BuilderProposalInput),
-        (value)=>BuilderProposalInput.parse(value),backend,profile.model);
+      return this.json("capability-builder",task,prompt,z.toJSONSchema(BuilderModelOutput),
+        (value)=>parseBuilderModelOutput(value),backend,profile.model);
     };
   }
   planner(): Planner {
