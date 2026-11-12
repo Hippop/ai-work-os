@@ -5,6 +5,7 @@ import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { ExternalSkillService } from "../../packages/external-skills/index.js";
 import { McpRegistry } from "../../packages/adaptive/mcp.js";
 import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
+import { probeOpenCode } from "../../packages/adaptive/opencode.js";
 import { BudgetService } from "../../packages/adaptive/budget.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import { AdaptiveAuditService } from "../../packages/adaptive/audit.js";
@@ -527,6 +528,8 @@ export function createApp(
     adaptive.syncMcpWriteIntent(checked.id);
     res.json(checked);
   });
+  app.get("/api/v2/agents/probe", (_req, res) =>
+    res.json([probeCodex(),probeOpenCode()]));
   app.get("/api/v2/profiles", (_req, res) => res.json(store.list("adaptive_profile")));
   app.post("/api/v2/profiles", (req, res) => res.status(201).json(adaptiveAssets.createProfile(req.body)));
   app.post("/api/v2/profiles/:id/publish", (req, res) => res.json(adaptiveAssets.publishProfile(req.params.id)));
