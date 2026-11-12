@@ -142,6 +142,41 @@ function requestProfile(store:Store,backend:"codex"|"opencode",profileRef?:strin
     throw new DomainError("builder_profile_denied","构建器仅接受已发布的无 MCP 授权只读 Agent Profile",422);
   return p;
 }
+/** Startup idempotent registration of the platform-owned Builder Skill, profiles and catalog entry. */
+export function bootstrapCapabilityBuilder(store:Store){
+  const assets=new AssetService(store);
+  const skill=builderSkillVersion();
+  const existing=store.get<{id:string;digest:string}>("adaptive_builder_skill",skill.id);
+  if(existing && existing.digest!==skill.digest)
+    throw new DomainError("builder_skill_version","内置 Builder Skill 已变更，请发布新的版本后升级",409);
+  if(!existing)store.put("adaptive_builder_skill",skill);
+  for(const backend of ["codex","opencode"] as const){
+    const name="core.builder."+backend,id=name+"@1.0.0";
+    if(!store.get("adaptive_profile",id)){
+      const profile=assets.createProfile({
+        name,version:"1.0.0",executor:"agent",agent:backend,
+        workspaceMode:"read-only",mcpGrants:[],skillIds:[],
+        timeoutSeconds:300,memoryLimitMb:2048,maxProcesses:128,
+      });
+      assets.publishProfile(profile.id);
+    }
+  }
+  if(!store.get("adaptive_capability",BUILDER_SKILL_ID)){
+    const cap=assets.createCapability({
+      name:"core.capability.builder",version:"1.0.0",
+      title:"Capability Builder（预制）",
+      description:"通过平台专用 Builder API，读取获授权参考资料，AI 推导原子能力契约与样例，并在人工评审前保存为候选",
+      inputSchema:{type:"object",properties:{goal:{type:"string"}},
+        required:["goal"],additionalProperties:false},
+      outputSchema:{type:"object",properties:{candidateId:{type:"string"}},
+        required:["candidateId"],additionalProperties:false},
+      sideEffect:"none",profileRef:BUILDER_CODEX_PROFILE,tags:["platform-builder"],
+    });
+    assets.validateCapability(cap.id,"Platform-owned Builder endpoints, reference bounds and contract validation");
+    assets.publishCapability(cap.id);
+  }
+}
+
 /** Platform-owned Builder. Never grants the AI's suggested side effect or publishes its proposal. */
 export class CapabilityBuilder {
   constructor(private store:Store,private agent:BuilderAgent){}
