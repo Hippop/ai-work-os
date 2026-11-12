@@ -721,7 +721,13 @@ export class AdaptiveEngine {
     const candidates = this.assets.listCapabilities().filter((c) => c.status === "published" && (!c.projectId || c.projectId === task.projectId));
     const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, "workflow.planner");
     const proposal = await this.planner.compose(task, candidates, knowledge, before);
-    const plan = this.validate(proposal, task.projectId, task.id);
+    // Keep the selected execution backend on platform core nodes when the planner
+    // revises remaining work. Explicit profiles for custom capabilities are preserved.
+    const usesOpenCode = before.plan.nodes.some((n) =>
+      n.capabilityRef.startsWith("core.") && n.profileRef?.startsWith("core.opencode."));
+    const plan = this.validate(
+      usesOpenCode ? selectCoreAgent(proposal,"opencode") : proposal,
+      task.projectId, task.id);
     return this.store.transaction(() => {
       const run = this.get(id);
       if (run.planRevision !== before.planRevision || Object.values(run.nodeStates).includes("running")) throw new DomainError("revision_conflict", "运行状态发生变化");
