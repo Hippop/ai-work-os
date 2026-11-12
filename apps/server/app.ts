@@ -10,6 +10,7 @@ import { BudgetService } from "../../packages/adaptive/budget.js";
 import { AdaptiveObservability } from "../../packages/adaptive/observability.js";
 import { AdaptiveAuditService } from "../../packages/adaptive/audit.js";
 import { AdaptiveEvaluationService } from "../../packages/adaptive/evaluation.js";
+import { CapabilityBuilder } from "../../packages/adaptive/builder.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
@@ -460,6 +461,31 @@ export function createApp(
         "统计覆盖人工与Agent运行；模型用量与优化评估指标尚未接入。",
       ],
     });
+  });
+  // Platform-owned Capability Builder: creates candidates only; never auto-publishes.
+  const capabilityBuilder = adaptiveRuntime
+    ? new CapabilityBuilder(store,adaptiveRuntime.builderAgent()) : null;
+  app.get("/api/v2/capability-builder", (_req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    res.json(capabilityBuilder.info());
+  });
+  app.get("/api/v2/capability-builder/sessions", (_req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    res.json(capabilityBuilder.sessions());
+  });
+  app.post("/api/v2/capability-builder/sessions", async (req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    res.status(201).json(await capabilityBuilder.create(req.body));
+  });
+  app.get("/api/v2/capability-builder/sessions/:id", (req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    const session=capabilityBuilder.get(req.params.id);
+    res.json({...session,materials:session.materials.map(({kind,label,digest,source})=>
+      ({kind,label,digest,source}))});
+  });
+  app.post("/api/v2/capability-builder/sessions/:id/revise", async (req,res) => {
+    if (!capabilityBuilder) throw new DomainError("runtime_unavailable","Builder Agent 不可用",503);
+    res.json(await capabilityBuilder.revise(req.params.id,req.body));
   });
   // Adaptive Work OS V2: versioned capability/knowledge assets and event-driven runs.
   const adaptiveAssets = new AssetService(store);
