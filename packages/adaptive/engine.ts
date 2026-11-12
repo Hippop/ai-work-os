@@ -5,6 +5,7 @@ import { DomainError, digest, type Task } from "../domain/index.js";
 import { AssetService, checkSchema, type Capability, type Profile } from "./assets.js";
 import { ExternalSkillService } from "../external-skills/index.js";
 import { McpRegistry } from "./mcp.js";
+import type { WriteIntent } from "./mcp-write.js";
 
 const nodeId = z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/);
 export const PlanNodeInput = z.object({
@@ -69,6 +70,7 @@ export type Executor = (call: CapabilityCall) => Promise<{
   output: unknown; artifacts?: string[];
   businessStatus?: "accepted" | "rejected" | "unknown";
   modelUsage?: { inputTokens?: number; outputTokens?: number };
+  pendingApproval?: { intentId: string };
 }>;
 
 function byId<T extends { id: string }>(items: T[]) { return new Map(items.map((item) => [item.id, item])); }
@@ -106,7 +108,15 @@ export class AdaptiveEngine {
         throw new DomainError("profile_scope", "执行配置不属于当前项目", 403);
       if (resolved.mcpGrants.length)
         new McpRegistry(this.store).resolve(resolved.mcpGrants, projectId);
-      if (cap.sideEffect === "external-write") throw new DomainError("approval_required", "外部写入能力须走单独审批机制，当前禁止自动派发", 422);
+      if (cap.sideEffect === "external-write") {
+        if (resolved.executor !== "mcp-write" || !resolved.mcpWrite)
+          throw new DomainError("approval_required", "外部写入节点必须绑定独立 MCP 人工审批配置", 422);
+        checkSchema(cap.outputSchema, {
+          summary:"MCP approved write executed",evidence:[],risks:[],
+        });
+      } else if (resolved.executor === "mcp-write") {
+        throw new DomainError("mcp_write_mismatch","只允许外部写入能力使用 MCP 写入配置",422);
+      }
       if (cap.sideEffect === "workspace-write" && resolved.workspaceMode !== "worktree-write")
         throw new DomainError("workspace_denied", "代码写入必须使用隔离工作区", 422);
       if (cap.sideEffect !== "workspace-write" && resolved.workspaceMode === "worktree-write")
@@ -467,7 +477,9 @@ export class AdaptiveEngine {
       if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write")
         this.store.put("adaptive_side_effect", {
           id: invocationId, runId: id, nodeId, capabilityRef: cap.id,
-          inputDigest: digest(input), state: "started", createdAt: new Date().toISOString(),
+          inputDigest: digest(input),
+          state: cap.sideEffect === "external-write" ? "awaiting_approval" : "started",
+          createdAt: new Date().toISOString(),
         });
       run.nodeStates[nodeId] = "running"; run.status = "running"; this.save(run);
       this.store.event(id, "adaptive.invocation.started", { invocationId, nodeId, profileRef, inputDigest: digest(input) });
@@ -488,6 +500,25 @@ export class AdaptiveEngine {
     try {
       if (!this.executor) throw new DomainError("executor_unavailable", "未配置能力执行器", 503);
       const response = await this.executor(prepared);
+      if (response.pendingApproval) {
+        this.store.transaction(() => {
+          const run=this.get(id);
+          if(run.nodeStates[nodeId]!=="running")return;
+          const intent=this.store.get<WriteIntent>("adaptive_mcp_write",response.pendingApproval!.intentId);
+          if(!intent || intent.runId!==id || intent.status!=="requested")
+            throw new DomainError("mcp_approval_invalid","MCP 审批请求与当前运行不匹配",409);
+          const record=this.store.get<any>("adaptive_invocation",prepared.invocationId)!;
+          run.nodeStates[nodeId]="waiting";run.status="waiting";this.save(run);
+          this.store.put("adaptive_invocation",{
+            ...record,status:"waiting",mcpIntentId:intent.id,
+          });
+          this.store.event(id,"adaptive.mcp.approval_requested",{
+            nodeId,invocationId:prepared.invocationId,intentId:intent.id,
+            tool:intent.server+"/"+intent.tool,argsDigest:intent.argsDigest,
+          });
+        });
+        return;
+      }
       checkSchema(prepared.capability.outputSchema, response.output);
       if (response.businessStatus === "rejected")
         throw new DomainError("business_rejected", "原子能力执行完成，但业务验收未通过", 422);
