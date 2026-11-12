@@ -2,6 +2,7 @@ import type { Task } from "../domain/index.js";
 import { Store } from "../persistence/index.js";
 import { AssetService, type Capability, type Profile } from "./assets.js";
 import type { Plan } from "./engine.js";
+import { selectCoreAgent, type AgentBackend } from "./agent-selection.js";
 
 const objectiveInput = {
   type: "object", additionalProperties: false, required: ["objective"],
@@ -67,7 +68,7 @@ export function bootstrapAdaptiveAssets(store: Store) {
 }
 
 /** Clearly labeled deterministic template, never misrepresented as AI composition. */
-export function standardAdaptivePlan(task: Task): Plan {
+export function standardAdaptivePlan(task: Task, agent: AgentBackend = "codex"): Plan {
   const diagnosis = task.type === "diagnosis";
   const operations = diagnosis
     ? ["collect", "hypothesize", "verify", "conclude", "deliver"]
@@ -86,5 +87,5 @@ export function standardAdaptivePlan(task: Task): Plan {
        { id: "after-test", afterNode: "test", question: "Do the test outcomes and new evidence justify changing the remaining plan?" }])
       .map((o) => ({ ...o, on: ["succeeded", "failed"] as ("succeeded" | "failed")[],
         barrier: true, maxInvocations: 1 }));
-  return { nodes, observations, rationale: "Deterministic platform default; review and verify before execution" };
+  return selectCoreAgent({ nodes, observations, rationale: "Deterministic platform default; review and verify before execution" },agent);
 }
