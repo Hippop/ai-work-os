@@ -45,6 +45,7 @@ const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
 const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner());
 adaptive.recover();
 new McpWriteService(store).recover();
+adaptive.syncPendingMcpWrites();
 let adaptiveBusy = false, adaptivePending = false;
 function driveAdaptive() {
   if (adaptiveBusy) { adaptivePending = true; return; }
