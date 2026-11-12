@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
-    "smoke:adaptive:linux": "tsx scripts/smoke-adaptive-linux.ts"
+    "smoke:adaptive:linux": "tsx scripts/smoke-adaptive-linux.ts",
+    "smoke:opencode:linux": "tsx scripts/smoke-opencode-linux.ts"
   },
   "repository": {
     "type": "git",
