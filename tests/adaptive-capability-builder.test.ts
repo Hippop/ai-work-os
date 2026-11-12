@@ -114,7 +114,7 @@ test("Builder snapshots text, project source, Skill and knowledge; revisions nev
     assert.equal(ctx.builder.get(created.sessionId).materialDigest,before);
     assert.match(ctx.prompts[1],/GC pause means a stop-the-world event/);
     assert.doesNotMatch(ctx.prompts[1],/Changed on disk/);
-    assert.equal(ctx.builder.sessions()[0].materials[0].content,undefined);
+    assert.ok(!Object.hasOwn(ctx.builder.sessions()[0].materials[0],"content"));
     assert.equal(ctx.store.events("builder:"+created.sessionId).length,2);
     ctx.assets.validateCapability(edited.capability.id,"Human inspected the generated sample");
     await assert.rejects(()=>ctx.builder.revise(created.sessionId,{instruction:"Change everything"}),
