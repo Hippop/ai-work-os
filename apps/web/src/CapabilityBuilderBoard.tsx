@@ -4,7 +4,7 @@ import type { Project } from "../../../packages/domain/index";
 type API=(path:string,data?:unknown)=>Promise<any>;
 type Skill={id:string;name:string;status:string};
 type Knowledge={id:string;title?:string;status:string;scope:string;projectId?:string|null};
-type Profile={id:string;status:string;executor:string;agent?:string;workspaceMode?:string;mcpGrants?:unknown[]};
+type Profile={id:string;status:string;executor:string;agent?:string;workspaceMode?:string;mcpGrants?:unknown[];projectId?:string|null};
 type Proposal={
   name:string;title:string;description:string;operatingInstructions:string;
   inputSchema:Record<string,unknown>;outputSchema:Record<string,unknown>;
@@ -105,7 +105,8 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
     finally{setBusy(false);}
   }
   const eligible=profiles.filter((p)=>p.status==="published"&&p.executor==="agent"&&
-    p.agent===backend&&p.workspaceMode==="read-only"&&!(p.mcpGrants?.length));
+    p.agent===backend&&p.workspaceMode==="read-only"&&!(p.mcpGrants?.length)&&
+    (!p.projectId||p.projectId===projectId));
   const candidateReadProfile="core."+((selected?.backend==="opencode")?"opencode":"codex")+".read@1.0.0";
   return <section className="panel">
     <h2>AI 原子能力构建助手（平台预制）</h2>
@@ -121,7 +122,7 @@ export function CapabilityBuilderBoard({api,act,projects,skills,knowledge,profil
         <label>授权项目
           <select value={projectId} onChange={(e)=>{setProjectId(e.target.value);setKnowledgeIds([]);}} required>
             <option value="">选择项目（必须授权 Agent）</option>
-            {projects.map((p)=><option key={p.id} value={p.id}>{p.name}</option>)}
+            {projects.filter((p)=>p.allowAgent).map((p)=><option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
         </label>
         <label>构建 Agent
