@@ -41,6 +41,10 @@ export function renderOpenCodeConfig(mode:Mode,mcp:OpenCodeMcp) {
     {action:"read",resource:"*",effect:"allow"},
     {action:"glob",resource:"*",effect:"allow"},
     {action:"grep",resource:"*",effect:"allow"},
+    {action:"read",resource:"*.env",effect:"deny"},
+    {action:"read",resource:"*.env.*",effect:"deny"},
+    {action:"read",resource:"**/.env",effect:"deny"},
+    {action:"read",resource:"**/.env.*",effect:"deny"},
     {action:"shell",resource:"git status *",effect:"allow"},
     {action:"shell",resource:"git diff *",effect:"allow"},
   ];
@@ -166,7 +170,7 @@ export async function runOpenCode(options:{
   const isolated=isolatedOpenCodeHome(renderOpenCodeConfig(options.mode,options.mcp),
     {authFile:options.authFile});
   try {
-    const args=["run","--format","json","--dir",options.cwd,
+    const args=["run","--standalone","--format","json","--archived",
       ...(options.model?["--model",options.model]:[]),
       "--agent",options.mode==="worktree-write"?"aiwork_write":"aiwork_read",
       options.prompt+
