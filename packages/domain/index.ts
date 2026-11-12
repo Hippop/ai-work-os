@@ -78,6 +78,12 @@ export const ProjectInput = z.object({
       args: z.array(z.string().max(4000)).max(100),
     })
     .optional(),
+  authorizedCommands: z.array(z.object({
+    name:z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+    executable:z.string().min(1).max(2000),
+    args:z.array(z.string().max(4000)).max(100),
+    allowWorkspaceWrite:z.boolean().default(false),
+  }).strict()).max(30).default([]),
 });
 export type Project = z.infer<typeof ProjectInput> & {
   id: string;
