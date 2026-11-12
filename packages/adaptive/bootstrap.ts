@@ -25,6 +25,8 @@ export function bootstrapAdaptiveAssets(store: Store) {
   const profiles: { name: string; executor: Profile["executor"]; workspaceMode: Profile["workspaceMode"]; agent?: string }[] = [
     { name: "core.codex.read", executor: "agent", agent: "codex", workspaceMode: "read-only" },
     { name: "core.codex.write", executor: "agent", agent: "codex", workspaceMode: "worktree-write" },
+    { name: "core.opencode.read", executor: "agent", agent: "opencode", workspaceMode: "read-only" },
+    { name: "core.opencode.write", executor: "agent", agent: "opencode", workspaceMode: "worktree-write" },
     { name: "core.project.test", executor: "project-test", workspaceMode: "read-only" },
     { name: "core.builtin.deliver", executor: "builtin", workspaceMode: "none" },
   ];
