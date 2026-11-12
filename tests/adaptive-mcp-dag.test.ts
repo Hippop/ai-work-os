@@ -125,7 +125,7 @@ test("cancelled DAG cannot approve or execute an old pending MCP write",async()=
   const ctx=fixture();
   try{
     await ctx.engine.tick();
-    ctx.engine.cancel(ctx.run.id,"Stop external changes");
+    ctx.engine.cancel(ctx.run.id);
     const service=new McpWriteService(ctx.store);
     assert.throws(()=>service.decide(ctx.intent().id,true,
       "Operator approves after cancellation",ctx.intent().argsDigest),/关联工作流并非等待/);
