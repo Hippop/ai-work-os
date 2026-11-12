@@ -247,6 +247,7 @@ export class CapabilityBuilder {
     validateProposal(proposal);
     const assets=new AssetService(this.store);
     const name=proposal.name.startsWith("core.")?"custom."+proposal.name:proposal.name;
+    const normalizedProposal={...proposal,name};
     const now=new Date().toISOString();
     return this.store.transaction(()=>{
       let n=0;
@@ -262,8 +263,8 @@ export class CapabilityBuilder {
         id:randomUUID(),projectId:project.id,goal:request.goal,
         backend:request.backend,profileRef:profile.id,
         capabilityId:cap.id,materials,materialDigest:digest(materials),
-        proposal,revisions:[{number:1,instruction:"Initial construction",
-          at:now,proposalDigest:digest(proposal)}],
+        proposal:normalizedProposal,revisions:[{number:1,instruction:"Initial construction",
+          at:now,proposalDigest:digest(normalizedProposal)}],
         createdAt:now,updatedAt:now,
       };
       this.store.put("adaptive_builder_session",session);
@@ -272,7 +273,7 @@ export class CapabilityBuilder {
         sources:materials.map(({kind,source,digest})=>({kind,source,digest})),
         proposedSideEffect:proposal.suggestedSideEffect,backend:request.backend,
       },"user");
-      return {sessionId:session.id,capability:cap,proposal,revisions:session.revisions,
+      return {sessionId:session.id,capability:cap,proposal:normalizedProposal,revisions:session.revisions,
         materials:session.materials.map(({kind,label,digest,source})=>({kind,label,digest,source}))};
     });
   }
@@ -294,10 +295,22 @@ export class CapabilityBuilder {
         previous:session.proposal,instruction}),
     }));
     validateProposal(proposal);
+    const proposedName=proposal.name.startsWith("core.")?"custom."+proposal.name:proposal.name;
+    if(proposedName!==cap.name)
+      throw new DomainError("builder_name_immutable","已创建候选能力的 ID 不可改变，如需更名请新建草案",422);
     return this.store.transaction(()=>{
       const fresh=this.get(id);
       if(fresh.revisions.length!==session.revisions.length)
         throw new DomainError("builder_concurrent_edit","构建会话已被其他操作修改，请刷新",409);
+      const live=assets.getCapability(cap.id,false);
+      if(live.status!=="candidate" ||
+        live.description!==fresh.proposal.description ||
+        live.title!==fresh.proposal.title ||
+        live.operatingInstructions!==fresh.proposal.operatingInstructions ||
+        digest(live.inputSchema)!==digest(fresh.proposal.inputSchema) ||
+        digest(live.outputSchema)!==digest(fresh.proposal.outputSchema))
+        throw new DomainError("builder_candidate_changed",
+          "草案已在 Builder 外被手工修改，为防止覆盖请新建构建会话",409);
       const updated=assets.updateCandidate(cap.id,{
         title:proposal.title,description:proposal.description,
         operatingInstructions:proposal.operatingInstructions,
