@@ -1,3 +1,5 @@
+import { getRunGraph } from "../../packages/graph/projection.js";
+import { readLayout, saveLayout } from "../../packages/graph/layout-service.js";
 import { verifyArtifact } from "../../packages/adaptive/artifacts.js";
 import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
 import { AssetService, checkSchema } from "../../packages/adaptive/assets.js";
@@ -653,6 +655,10 @@ export function createApp(
     res.json(new AdaptiveAuditService(store).exportRun(req.params.id)));
   app.get("/api/v2/run-index", (_req,res)=>res.json(store.list<{id:string;taskId:string;status:string;createdAt:string}>("adaptive_run")
     .map(({id,taskId,status,createdAt})=>({id,taskId,status,createdAt,engine:"adaptive"}))));
+  // Read-only V2 run projection; layout writes never change execution semantics.
+  app.get("/api/v3/runs/:id/graph", (req, res) => res.json(getRunGraph(store, req.params.id)));
+  app.get("/api/v3/runs/:id/layout", (req, res) => res.json(readLayout(store, req.params.id)));
+  app.post("/api/v3/runs/:id/layout", (req, res) => res.json(saveLayout(store, req.params.id, req.body)));
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
   app.post("/api/v2/tasks/:id/preflight",(req,res)=>{
     if(!adaptiveRuntime)throw new DomainError("runtime_unavailable","执行器不可用",503);

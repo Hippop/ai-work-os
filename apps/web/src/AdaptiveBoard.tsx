@@ -1,3 +1,4 @@
+import { RunCanvas } from "./features/canvas/RunCanvas";
 import { useEffect, useState, type FormEvent } from "react";
 import type { Task, Project } from "../../../packages/domain/index";
 import { McpWriteBoard } from "./McpWriteBoard";
@@ -120,6 +121,17 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
       <h2>AI Work OS V2 · 自适应能力与知识工作台</h2>
       <p>Capability 定义输入输出，Profile 控制执行环境，Knowledge Hub 管理可引用知识。Agent 负责编排和评估；事件调度器控制运行状态。尚未配置可用 Codex 时可创建并验证手动 DAG。</p>
       {notice && <p role="status">{notice}</p>}
+    </div>
+    <div className="panel">
+      <h2>任务运行画布</h2>
+      <label>选择任务运行<select value={selectedRun} onChange={e=>setSelectedRun(e.target.value)}>
+        <option value="">请选择已有运行</option>
+        {runs.map(r=><option key={r.id} value={r.id}>{tasks.find(t=>t.id===r.taskId)?.title ?? r.taskId} · {r.status}</option>)}
+      </select></label>
+      {selectedRun ? <RunCanvas key={selectedRun} runId={selectedRun} api={api} onInspect={node=>{
+        const target=document.getElementById(`run-detail-${node.kind}-${node.sourceId}`);
+        target?.scrollIntoView({behavior:"smooth",block:"center"});target?.focus({preventScroll:true});
+      }}/> : <p>创建并下发任务后，在这里查看流程、节点状态和知识引用。</p>}
     </div>
     <CapabilityBuilderBoard api={api} act={act} projects={projects}
       skills={skills} knowledge={knowledge} profiles={profiles} onChanged={load}/>
@@ -733,7 +745,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
             }}>人工核对真实 token 用量</button>}
           </article>)}
         </details>}
-        {current.plan.nodes.map((n)=><article className="project" key={n.id}>
+        {current.plan.nodes.map((n)=><article className="project" key={n.id} id={`run-detail-capability-${n.id}`} tabIndex={-1}>
           <b>{n.id}</b> · {n.capabilityRef} · {current.nodeStates[n.id] ?? "pending"}
           <small> · 依赖：{n.dependsOn.join(", ") || "无"}</small>
           {current.failures[n.id] && <p>{current.failures[n.id]}</p>}
@@ -765,7 +777,7 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
             }}>提交人工执行结果</button>}
         </article>)}
         <h3>观察点</h3>
-        {current.plan.observations.map((o)=><article className="project" key={o.id}>
+        {current.plan.observations.map((o)=><article className="project" key={o.id} id={`run-detail-observation-${o.id}`} tabIndex={-1}>
           <b>{o.id}</b> · {current.observationStates[o.id] ?? "未触发"}
           <p>{o.question}</p>
           {current.status === "waiting" &&

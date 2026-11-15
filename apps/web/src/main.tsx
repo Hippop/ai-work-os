@@ -1,3 +1,4 @@
+import { apiPath } from "./api-path";
 import {ProjectRuntimeSettings} from "./ProjectRuntimeSettings";
 import { taskRunLink, type RunLink } from "./run-navigation";
 import React, { useEffect, useState } from "react";
@@ -125,7 +126,7 @@ function App() {
     data?: unknown,
     headers: Record<string, string> = {},
   ): Promise<T> {
-    const response = await fetch(path.startsWith("/v2/") ? `/api${path}` : `/api/v1${path}`, {
+    const response = await fetch(apiPath(path), {
       method: data === undefined ? "GET" : "POST",
       headers: {
         Authorization: `Bearer ${token}`,

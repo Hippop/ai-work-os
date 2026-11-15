@@ -781,6 +781,10 @@ export class AdaptiveEngine {
     if (this.store.list<{runId:string;status:string;mcpIntentId?:string}>("adaptive_invocation")
         .some((i)=>i.runId===id && i.status==="waiting" && !!i.mcpIntentId))
       throw new DomainError("pending_mcp_approval","MCP 写入节点仍在等待审批，不能通过重规划绕过或删除它",409);
+    this.assertNoExternalInFlight(before);
+    if (Object.values(before.nodeStates).includes("uncertain"))
+      throw new DomainError("recovery_required", "仍有未核对的能力副作用", 409);
+    const expectedRunDigest = digest(before);
     if (before.revisionCount >= 5) throw new DomainError("replan_limit", "已达到重规划上限", 422);
     if (Object.values(before.nodeStates).includes("running")) throw new DomainError("active_invocation", "执行中节点不能热替换", 409);
     const task = this.store.get<Task>("task", before.taskId)!;
@@ -797,6 +801,10 @@ export class AdaptiveEngine {
     return this.store.transaction(() => {
       const run = this.get(id);
       if (run.stopRequested || run.status !== "waiting" || run.planRevision !== before.planRevision || Object.values(run.nodeStates).includes("running")) throw new DomainError("revision_conflict", "运行状态发生变化");
+      if (digest(run) !== expectedRunDigest)
+        throw new DomainError("revision_conflict", "规划期间运行内容已改变，请重新规划", 409);
+      this.assertNoExternalInFlight(run);
+      this.assertTaskReady(this.assertOwnership(run));
       const oldNodes = byId(run.plan.nodes), states: AdaptiveRun["nodeStates"] = {}, results: AdaptiveRun["results"] = {};
       const nextSnapshots: AdaptiveRun["snapshots"] = {};
       for (const node of plan.nodes) {
@@ -828,11 +836,11 @@ export class AdaptiveEngine {
         states[node.id] = retained ? "succeeded" : "pending";
         if (retained) results[node.id] = run.results[node.id];
       }
-      // A completed write has already changed the worktree. It cannot disappear or be replayed
+      // A completed write has already changed the worktree or an external system. It cannot disappear or be replayed
       // merely because the planner changed the upstream plan. Require a new downstream write node.
       for (const [oldId, oldState] of Object.entries(run.nodeStates)) {
         if (oldState !== "succeeded" ||
-            run.snapshots[oldId]?.capability.sideEffect !== "workspace-write") continue;
+            !["workspace-write", "external-write"].includes(run.snapshots[oldId]?.capability.sideEffect ?? "")) continue;
         if (states[oldId] !== "succeeded")
           throw new DomainError("write_replan_unsafe",
             "重规划不能删除或重放已经完成的写入能力；请保留原节点并新增后续能力", 409);

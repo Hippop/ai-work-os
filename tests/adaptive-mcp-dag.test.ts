@@ -133,3 +133,67 @@ test("cancelled DAG cannot approve or execute an old pending MCP write",async()=
   }finally{await ctx.runtime.close();ctx.store.close();
     rmSync(ctx.folder,{recursive:true,force:true});}
 });
+
+for (const change of ["remove", "rename", "change-input", "keep"] as const) {
+  test(`replan ${change}: confirmed external writes retain their original invocation or reject atomically`, async () => {
+    const ctx = fixture(); let calls = 0;
+    try {
+      const service = new McpWriteService(ctx.store, async () => { calls++; return {content: [{text: "done"}]}; });
+      await ctx.engine.tick();
+      service.decide(ctx.intent().id, true, "Reviewed exact resource and value", ctx.intent().argsDigest);
+      await service.execute(ctx.intent().id); ctx.engine.syncMcpWriteIntent(ctx.intent().id);
+      const before = ctx.engine.get(ctx.run.id);
+      before.status = "waiting";
+      before.decisions.check = {decision:"REPLAN",reason:"Review next steps after remote change",affectedNodeIds:[],evidenceRefs:[]};
+      ctx.store.put("adaptive_run", before);
+      const next = structuredClone(before.plan);
+      if (change === "remove") { next.nodes.shift(); next.nodes[0].dependsOn = []; }
+      if (change === "rename") { next.nodes[0].id = "remote_new"; next.nodes[1].dependsOn = ["remote_new"]; }
+      if (change === "change-input") next.nodes[0].inputs.value = "different";
+      ctx.engine.planner = {compose: async () => next, evaluate: async () => before.decisions.check};
+      if (change === "keep") {
+        const revised = await ctx.engine.replan(before.id, "check");
+        assert.equal(revised.nodeStates.remote, "succeeded");
+        assert.equal(revised.results.remote.invocationId, before.results.remote.invocationId);
+        await ctx.engine.tick();
+      } else {
+        await assert.rejects(ctx.engine.replan(before.id, "check"), (error: any) => error.code === "write_replan_unsafe");
+        assert.deepEqual(ctx.engine.get(before.id), before);
+      }
+      assert.equal(calls, 1);
+      assert.equal(ctx.intent().status, "succeeded");
+    } finally { await ctx.runtime.close(); ctx.store.close(); rmSync(ctx.folder, {recursive:true,force:true}); }
+  });
+}
+test("replan rejects same-revision state changes made while the planner is running", async () => {
+  const ctx = fixture();
+  try {
+    const before = ctx.engine.get(ctx.run.id); before.status = "waiting";
+    before.decisions.check = {decision:"REPLAN",reason:"Plan pending remote change",affectedNodeIds:[],evidenceRefs:[]};
+    ctx.store.put("adaptive_run", before);
+    ctx.engine.planner = {compose: async () => {
+      const changed = ctx.engine.get(before.id);
+      changed.decisions.check.reason = "A newer operator decision must not be overwritten";
+      ctx.store.put("adaptive_run", changed);
+      return before.plan;
+    }, evaluate: async () => before.decisions.check};
+    await assert.rejects(ctx.engine.replan(before.id, "check"), (error: any) => error.code === "revision_conflict");
+    assert.equal(ctx.engine.get(before.id).planRevision, before.planRevision);
+    assert.match(ctx.engine.get(before.id).decisions.check.reason, /newer operator/);
+  } finally { await ctx.runtime.close(); ctx.store.close(); rmSync(ctx.folder, {recursive:true,force:true}); }
+});
+test("replan rechecks external intent state at commit even when run revision is unchanged", async () => {
+  const ctx = fixture();
+  try {
+    const before = ctx.engine.get(ctx.run.id); before.status = "waiting";
+    before.decisions.check = {decision:"REPLAN",reason:"Plan pending remote change",affectedNodeIds:[],evidenceRefs:[]};
+    ctx.store.put("adaptive_run", before);
+    ctx.engine.planner = {compose: async () => {
+      ctx.store.put("adaptive_invocation", {id:"late-invocation",runId:before.id,mcpIntentId:"late-intent"});
+      ctx.store.put("adaptive_mcp_write", {id:"late-intent",status:"uncertain"});
+      return before.plan;
+    }, evaluate: async () => before.decisions.check};
+    await assert.rejects(ctx.engine.replan(before.id, "check"), (error: any) => error.code === "external_inflight");
+    assert.deepEqual(ctx.engine.get(before.id), before);
+  } finally { await ctx.runtime.close(); ctx.store.close(); rmSync(ctx.folder, {recursive:true,force:true}); }
+});
