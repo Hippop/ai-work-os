@@ -10,18 +10,23 @@
 
 ## 设计文档
 
-- [Canvas V3.1 开发架构设计](docs/AI-Work-OS-Canvas-V3.1-开发架构设计.md)：细化任务画布交互、草案与编译计划、节点知识契约、CLI 接管、结果有效性与副作用、API/数据模型、数据库迁移、开发工作包及 26 项验收场景。**开发设计基线，正在分阶段实施；当前完成范围见首批说明。**
+- [Canvas V3.1 开发架构设计](docs/AI-Work-OS-Canvas-V3.1-开发架构设计.md)：细化任务画布交互、草案与编译计划、节点知识契约、CLI 接管、结果有效性与副作用、API/数据模型、数据库迁移、开发工作包及 26 项验收场景。**核心前后端模块、V3 API 与 A01–A26 自动化验收测试已实现，详见下方实现说明。**
 
 - [平台功能与架构完整设计稿 v1.0](docs/AI-Work-OS-设计稿-v1.0.md)：产品功能、交互、领域模型、执行内核、Agent 接入、知识与 Skill、优化闭环、工程架构和验收路线。
 - [自适应原子能力与知识驱动工作流架构方案 V2.1](docs/AI-Work-OS-自适应原子能力架构方案-v2.1.md)：原子能力、Skill 智能转化、知识管理、编排、阶段观察、事件驱动与重规划的原始设计。
-- [Canvas V3 完整方案（设计提案）](docs/AI-Work-OS-Canvas-V3-完整方案.md)：统一画布、原子能力、Agent Workspace 与交互式 CLI、Skill/工作目录、知识流、动态重规划、安全边界、开发路线和验收。**整体方案未完成；已开始实现运行画布，见下方首批说明。**
+- [Canvas V3 完整方案（设计提案）](docs/AI-Work-OS-Canvas-V3-完整方案.md)：统一画布、原子能力、Agent Workspace 与交互式 CLI、Skill/工作目录、知识流、动态重规划、安全边界、开发路线和验收。**已按 V3.1 开发基线完成核心前后端与自动化测试落地；真实浏览器与实机 CLI 仍需目标环境验收。**
 - [设计来源与决策记录](docs/设计来源与决策记录.md)：原对话共识、本次优化、外部资料和待实现验证项。
 
-## Canvas V3.1 首批实现
+## Canvas V3.1 实现
 
-“自适应工作流”顶部新增运行画布，展示能力、观察点、依赖、数据绑定、冻结执行配置与实际知识引用；支持缩放、节点移动及独立布局保存。重规划新增已成功外部写入保护和运行内容冲突检查。详见 [首批实现与验证](docs/Canvas-V3.1-首批实现与验证.md)。
+已按 [Canvas V3.1 开发架构设计](docs/AI-Work-OS-Canvas-V3.1-开发架构设计.md) 完成统一画布核心实现与自动化验收（`A01–A26`）：
 
-当前画布只投影已有运行；可编辑草案、完整知识契约、效果台账与交互式 CLI 尚未完成。真实浏览器交互仍需目标环境验收。
+- **统一画布与草案工作台**：支持运行投影、可编辑 `PlanDraft`、确定性编排、`GraphCompiler`（`PlanGap` / JSON Pointer / 条件跳过 `block|use-default|omit` / 环检测 / 质量门禁）、`ChangeProposal` 影响分析与 `?revision=` 历史视图切换；支持事件流增量分页与布局 CAS 保存。
+- **知识契约、有效性及副作用台账**：支持节点 `knowledgeInputs`/`knowledgeOutputs`、`ContextAssembler`（作用域/冲突/撤销/工件摘要防篡改/预算控制）、`KnowledgeCurationService`、`ResultValidity` 与 `EffectRecord`（外部写入保护与不确定失败转 `reconciling`）。
+- **工作区锁与交互式 CLI**：支持 `WorkspaceAccessCoordinator` 互斥与重启核对、`InterventionService`、`AgentSessionManager` 与 RFC 6455 WebSocket 终端流（断连不杀后台进程、单写入者与输出环形重放）。
+- **数据库迁移与兼容性**：SQLite 原子迁移 `v0 -> v1 -> v2` 并双写 11 张专用 V3 表，向后兼容全部 V1/V2 API。
+
+详情及测试/目标环境验收清单见 [实现与验证说明](docs/Canvas-V3.1-首批实现与验证.md)。真实 Chromium 浏览器交互、实机认证 Codex/OpenCode CLI 与 Linux cgroup v2 隔离仍需在目标环境验收。
 
 ## 任务级动态流程组装
 

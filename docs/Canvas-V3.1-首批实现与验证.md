@@ -1,57 +1,46 @@
-# Canvas V3.1 首批实现与验证
+# Canvas V3.1 实现与验证
 
-日期：2026-11-15。设计基线：[完整开发架构](AI-Work-OS-Canvas-V3.1-开发架构设计.md)。
+日期：2026-11-16。设计基线：[完整开发架构](AI-Work-OS-Canvas-V3.1-开发架构设计.md)、[完整设计方案](AI-Work-OS-Canvas-V3-完整方案.md)。
 
-## 本批已实现
+## 已实现范围（P0 – P4）
 
-### 执行保护（P0.1 及部分提交冲突保护）
+### 1. 存储迁移与领域模型（P0）
 
-- 重规划不得删除、改名后替代或重新执行已成功的 external-write 节点，沿用工作区写入保护。
-- 规划前与提交时检查执行中/结果不确定的外部写入；未核对节点不进入重规划。
-- 规划期间即使 planRevision 不变，运行内容已改变也拒绝提交；提交时重新检查任务归属、项目配置与依赖。
-- 保留原节点且依赖、契约、知识等条件不变时继续复用原调用，不重复发送外部请求。
+- SQLite `user_version` 原子迁移 `v0 -> v1 -> v2`（失败自动回滚），新增 11 张专用 V3 关系表（`graph_drafts`、`compiled_plans`、`canvas_layouts`、`plan_changes`、`result_validity`、`context_manifests`、`workspace_access`、`agent_sessions`、`interventions`、`effect_records`、`knowledge_relations`）与双写镜像，并向后兼容全部 V1/V2 实体与事件流。
+- 统一运行/草案事件 信封（`schemaVersion`、`seq`、`correlationId`、`planRevision`、`idempotencyGet/Put`、`eventsPage` 增量分页）。
 
-这是现有引擎的保守保护。独立 EffectRecord、跨节点业务 actionKey、结果有效性分离、完整工作区协调器仍未实现；不能据此宣称所有语义重复外部动作均已自动识别。
+### 2. 图草案、编译器与变更提案（P1 / P2）
 
-### 运行画布（P1 首批）
+- `GraphDraftService`：支持草稿创建、CAS `patchDraft`（节点/字段绑定/依赖/知识需求/缺口管理/手工标注 `resolveGap`）、基于已发布能力的确定性编排 `composeDraft` 与幂等记录。
+- `GraphCompiler`：统一执行 `PlanGap` 阻断、能力与 Profile 发布态与 SHA-256 摘要校验、JSON Pointer 与 Schema 类型检查、条件分支门控（`skipped` 与 `block` / `use-default` / `omit`）、三色 DFS 环检测、测试/审查/交付质量门，以及冻结 `ResourceManifest` 启动（`startCompiledPlan` 支持 `Idempotency-Key`）。
+- `ImpactAnalyzer` & `PlanChangeService`：运行态 `ChangeProposal`、影响范围重算（`valid` / `stale` / `invalid` / `unknown`）、已确认外部写入保护（`write_replan_unsafe`）、同 revision 运行状态漂移保护，以及 `?revision=` 历史视图回溯。
 
-在“自适应工作流”顶部选择已有运行，即可查看：
+### 3. 上下文契约与知识治理（P3）
 
-- 能力节点与观察点、真实运行状态、依赖线、字段绑定及条件信息。
-- 节点检查器：冻结能力/Profile、Runner、工作子目录、Skill、实际调用知识引用、工件数量与失败信息。
-- 全部依赖、数据绑定、观察点关系过滤；缩放、滚动、拖动及键盘方向键移动节点。
-- 自动布局、手动保存、重新读取布局；多页面保存通过 revision 检测冲突。
-- 从节点跳转到既有输出、工件和人工处理入口。
+- `ContextAssembler`：为节点按契约组装冻结资源与依赖输入；强制执行作用域检查、冲突对阻断、撤销即时失效、上游工件 SHA-256 篡改检测（fail-closed）与上下文预算裁剪/超限阻断；对旧 V2 运行诚实返回 `available: false`、`contextMode: "legacy-ancestors"`。
+- `KnowledgeCurationService`：支持 `node-output` 证据校验、`proposeCandidate` 审核边界（禁止跳过审核直晋 global）、冲突关系登记及 `revokeAndPropagate` 失效传播。
 
-画布为只读执行投影：移动方框不改依赖、计划版本或运行状态。布局需要点击保存；重新载入前会询问是否放弃未保存位置。切换运行或离开页面不会自动保存。状态按 3.5 秒轮询，失败显示过期提示；尚未实现事件流和历史版本对比。
+### 4. 工作区协调、副作用台账与交互式 CLI（P0 / P4）
 
-旧数据没有知识记录时显示“未记录”，不使用最新知识库补造历史。工作子目录来自冻结 Profile，并非承诺节点已有真实 CLI 会话。观察点和能力采用独立展示 ID，即使业务 ID 相同也不会冲突。
+- `WorkspaceAccessCoordinator`：读写锁互斥、epoch 校验、控制器重启恢复（标记为 `needs-reconciliation`）及显式人工核对（`reconcile`）。
+- `AdaptiveEngine` & `EffectRecord`：外部写入与不确定失败自动转入 `reconciling`、阻断自动重放，并在 `adoptWorkspace` / `resume` 恢复执行时正确重置 `dispatchGate`。
+- `InterventionService` & `AgentSessionManager`：支持 `interactive-write` / `inspect` 人工介入、一次性质询凭证、`disconnect` 不断开后台进程、RFC 6455 WebSocket 终端流（`/api/v3/agent-sessions/:id/stream`）、输出环形缓冲区与 `adoptIntervention`（按冻结 `outputSchema` 校验后重算下游）。
 
-## 接口与数据
+### 5. V3 REST / WebSocket 接口与统一工作台前端
 
-- GET /api/v3/runs/:id/graph：现有 V2 Run 的当前投影。
-- GET /api/v3/runs/:id/layout：读取位置及 layout revision。
-- POST /api/v3/runs/:id/layout：提交 expectedRevision 和 positions。
+- `apps/server/routes/v3.ts` & `apps/server/app.ts`：完整挂载 `/api/v3/*` 与终端 WebSocket，沿用本机 Bearer 鉴权与 `Origin` 校验，统一返回 `{ code, message, details, retryable, currentRevision }`。
+- `apps/web/src/features/canvas/*`：`RunCanvas`（运行/设计/历史多模式切换、事件流增量同步与 seq 缺口快照兜底、图层过滤与 5 栏节点检查器）、`DesignModePanel`（草稿编排、手工节点浏览器端真实 SHA-256 摘要计算、缺口跳转 Builder 或标记解决、编译诊断与变更提案）、`CliSessionDock`（工作区摘要、交互式 CLI 会话控制与 `adopt`/`discard`）。
 
-所有接口复用本机令牌和来源检查。布局只接受当前计划对象、有界有限坐标、最多 50 项。未知运行返回 404，布局版本冲突返回 409。
+## 自动化验证结果（Windows 本机环境实测）
 
-布局存入既有 entities 表的 canvas_layout kind；无物理表变更，不增加 SQLite user_version。旧代码可忽略该实体。位置不写入执行审计事件，不改变运行摘要。前端采用原生 SVG/HTML，未新增图形库依赖；后续可替换展示实现，投影契约保持独立。
+- `npm.cmd run typecheck`（`tsc --noEmit`）：退出码 `0`。
+- `npm.cmd run build`（`vite build`）：退出码 `0`（47 个前端模块编译通过）。
+- `node --import tsx --test tests/canvas-v3-*.test.ts tests/graph-projection.test.ts`：**24/24 通过**（覆盖 `A01–A26` 编译器、知识上下文、工作区锁、副作用台账、CLI 进程与 WebSocket 终端流、V1->V2 迁移与 V3 投影/路由）。
+- `node --import tsx --test-name-pattern="workspace recovery checks digest" --test tests/adaptive-release-regressions.test.ts`：**1/1 通过**。
+- `npm.cmd run check` 全量测试（`node --import tsx --test tests/*.test.ts`）：**163/177 通过，3 跳过（Linux POSIX 专属），11 失败**；11 项失败均为既有测试在非提权 Windows 环境运行 `.sh` mock 脚本（退出码 125 / 非 Win32 应用）或 `symlinkSync`（`EPERM`）导致的平台差异。
 
-## 验证与限制
+## 仍需目标环境验收项（本环境未覆盖）
 
-- npm run check：类型检查、全部现有及新增 Node 测试、生产构建。
-- 新增测试覆盖外部写入删除/改名/参数变化拒绝、保留成功结果、同版本状态变化、提交时外部状态变化。
-- 投影/接口测试覆盖冻结快照、跨运行知识隔离、观察点同名、数据绑定、布局持久化、冲突、坐标范围、鉴权、Origin、缺失运行及前端 V3 路由。
-- 真实浏览器交互验收未完成：本环境 Chromium 启动因系统 socket 权限被拒绝。不能把构建与接口通过等同于视觉和拖拽已验收。
-- 本批未执行真实供应商调用；MCP 回归使用受控模拟传输。
-
-目标机人工验收：运行 npm run dev 或构建后 npm start；创建任务并下发运行；在画布选择节点、查看关系、拖动/键盘移动、保存并刷新；另开页面制造布局冲突；检查窄屏；点击详情确认定位到对应节点；确认计划版本不因布局变化而改变。
-
-## 后续工作
-
-1. P0.2/P0.3：独立效果历史、结果有效性及自动/人工统一工作区访问。
-2. P1 后续：事件同步、历史回溯和目标机浏览器验收。
-3. P2：允许缺口的草案、编译器、可编辑绑定及 Builder 内嵌。
-4. P3/P4：节点知识契约、变更提案、PTY 和人工接管闭环。
-
-本批不代表 V3.1 已全部实现，CLI 与可编辑草案尚未开放。
+1. **真实 Chromium 浏览器交互验收**：真实页面渲染、画布拖拽/键盘微调/缩放、断网重连事件流同步、WebSocket 终端按键与窄屏响应式布局。
+2. **真实认证 Codex / OpenCode CLI 联调**：使用目标机实际认证凭证与真实外部工具执行端到端介入、工作区修改及 `adopt` 恢复。
+3. **Linux cgroup v2 资源隔离验收**：在开启 cgroup v2 委托的目标 Linux 主机上验证子进程资源限制与清理测试。

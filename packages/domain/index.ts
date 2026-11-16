@@ -166,4 +166,7 @@ export type Event = {
   actor: string;
   at: string;
   payload: unknown;
+  correlationId?: string;
+  causationId?: string;
+  planRevision?: number;
 };

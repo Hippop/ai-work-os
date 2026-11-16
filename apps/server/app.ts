@@ -1,5 +1,5 @@
-import { getRunGraph } from "../../packages/graph/projection.js";
-import { readLayout, saveLayout } from "../../packages/graph/layout-service.js";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { verifyArtifact } from "../../packages/adaptive/artifacts.js";
 import { standardAdaptivePlan } from "../../packages/adaptive/bootstrap.js";
 import { AssetService, checkSchema } from "../../packages/adaptive/assets.js";
@@ -14,6 +14,12 @@ import { AdaptiveObservability } from "../../packages/adaptive/observability.js"
 import { AdaptiveAuditService } from "../../packages/adaptive/audit.js";
 import { AdaptiveEvaluationService } from "../../packages/adaptive/evaluation.js";
 import { CapabilityBuilder } from "../../packages/adaptive/builder.js";
+import {
+  AgentSessionManager,
+  InterventionService,
+  attachTerminalWebSocket,
+} from "../../packages/runtime/sessions/index.js";
+import { createV3Router } from "./routes/v3.js";
 import express from "express";
 import { z, ZodError } from "zod";
 import { resolve, join, basename, relative, isAbsolute, sep as pathSep } from "node:path";
@@ -42,6 +48,32 @@ import {
   digest,
 } from "../../packages/domain/index.js";
 
+export function isAllowedLocalOrigin(
+  origin: string | undefined,
+  localPort?: number | null,
+): boolean {
+  if (!origin) return true;
+  const allowed = [
+    "http://127.0.0.1:4310",
+    "http://localhost:4310",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    ...(localPort
+      ? [`http://127.0.0.1:${localPort}`, `http://localhost:${localPort}`]
+      : []),
+  ];
+  return allowed.includes(origin);
+}
+
+export function attachV3WebSocket(server: Server, app: express.Express): void {
+  const sessions = app.locals.v3Sessions as AgentSessionManager | undefined;
+  if (!sessions) return;
+  attachTerminalWebSocket(server, sessions, (origin) => {
+    const addr = server.address() as AddressInfo | null;
+    return isAllowedLocalOrigin(origin, addr?.port ?? null);
+  });
+}
+
 export function createApp(
   store: Store,
   token: string,
@@ -52,6 +84,10 @@ export function createApp(
 ) {
   if (adaptiveRuntime && !adaptive.control) adaptive.control = adaptiveRuntime.control?.();
   const app = express();
+  const v3Interventions = new InterventionService(store);
+  const v3Sessions = new AgentSessionManager(store);
+  app.locals.v3Interventions = v3Interventions;
+  app.locals.v3Sessions = v3Sessions;
   const resources = new ResourceService(store);
   const planning = new PlanningService(store),
     diagnosis = new DiagnosisService(store);
@@ -62,17 +98,7 @@ export function createApp(
   app.use("/api", (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     const origin = req.get("origin");
-    if (
-      origin &&
-      ![
-        "http://127.0.0.1:4310",
-        "http://localhost:4310",
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        `http://127.0.0.1:${req.socket.localPort}`,
-        `http://localhost:${req.socket.localPort}`,
-      ].includes(origin)
-    ) {
+    if (!isAllowedLocalOrigin(origin, req.socket.localPort)) {
       res.status(403).json({ code: "origin_denied", message: "来源不允许" });
       return;
     }
@@ -89,7 +115,7 @@ export function createApp(
     next();
   });
   app.get("/api/v1/health", (_req, res) =>
-    res.json({ status: "ok", schemaVersion: 1 }),
+    res.json({ status: "ok", schemaVersion: 1, dbSchemaVersion: store.schemaVersion }),
   );
   app.get("/api/v1/runtimes", (_req, res) =>
     res.json([{ id: "codex", ...service.runtime }]),
@@ -655,10 +681,18 @@ export function createApp(
     res.json(new AdaptiveAuditService(store).exportRun(req.params.id)));
   app.get("/api/v2/run-index", (_req,res)=>res.json(store.list<{id:string;taskId:string;status:string;createdAt:string}>("adaptive_run")
     .map(({id,taskId,status,createdAt})=>({id,taskId,status,createdAt,engine:"adaptive"}))));
-  // Read-only V2 run projection; layout writes never change execution semantics.
-  app.get("/api/v3/runs/:id/graph", (req, res) => res.json(getRunGraph(store, req.params.id)));
-  app.get("/api/v3/runs/:id/layout", (req, res) => res.json(readLayout(store, req.params.id)));
-  app.post("/api/v3/runs/:id/layout", (req, res) => res.json(saveLayout(store, req.params.id, req.body)));
+  // Canvas V3.1 routes (graph projection, drafts, compiler, change proposals, sessions, knowledge governance).
+  app.use(
+    "/api/v3",
+    createV3Router({
+      store,
+      service,
+      adaptive,
+      adaptiveRuntime,
+      sessions: v3Sessions,
+      interventions: v3Interventions,
+    }),
+  );
   app.get("/api/v2/adaptive-runs", (_req, res) => res.json(store.list("adaptive_run")));
   app.post("/api/v2/tasks/:id/preflight",(req,res)=>{
     if(!adaptiveRuntime)throw new DomainError("runtime_unavailable","执行器不可用",503);
@@ -817,5 +851,12 @@ export function createApp(
       });
     },
   );
+  const rawListen = app.listen.bind(app);
+  app.listen = ((...args: Parameters<typeof rawListen>) => {
+    const server = rawListen(...args);
+    attachV3WebSocket(server, app);
+    return server;
+  }) as typeof app.listen;
+
   return app;
 }

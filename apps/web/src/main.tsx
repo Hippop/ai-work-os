@@ -125,9 +125,11 @@ function App() {
     path: string,
     data?: unknown,
     headers: Record<string, string> = {},
+    method?: string,
   ): Promise<T> {
+    const resolvedMethod = method ?? (data === undefined ? "GET" : "POST");
     const response = await fetch(apiPath(path), {
-      method: data === undefined ? "GET" : "POST",
+      method: resolvedMethod,
       headers: {
         Authorization: `Bearer ${token}`,
         ...(data !== undefined ? { "Content-Type": "application/json" } : {}),
@@ -136,7 +138,15 @@ function App() {
       body: data === undefined ? undefined : JSON.stringify(data),
     });
     const result = await response.json();
-    if (!response.ok) throw new Error(result.message ?? "请求失败");
+    if (!response.ok) {
+      const err = new Error(result.message ?? "请求失败") as Error & {
+        code?: string;
+        details?: unknown;
+      };
+      err.code = result.code;
+      err.details = result.details;
+      throw err;
+    }
     return result;
   }
   async function refresh() {

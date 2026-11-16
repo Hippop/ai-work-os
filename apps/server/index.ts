@@ -13,6 +13,8 @@ import { acquireController } from "../../packages/runtime/recovery.js";
 import { AdaptiveRuntime } from "../../packages/adaptive/runtime.js";
 import { AdaptiveEngine } from "../../packages/adaptive/engine.js";
 import { McpWriteService } from "../../packages/adaptive/mcp-write.js";
+import type { AgentSessionManager } from "../../packages/runtime/sessions/index.js";
+import { WorkspaceAccessCoordinator } from "../../packages/workspace/access.js";
 
 const dataDir =
   process.env.AI_WORK_OS_DATA_DIR ??
@@ -44,6 +46,7 @@ bootstrapAdaptiveAssets(store);
 const adaptiveRuntime = new AdaptiveRuntime(store, dataDir);
 const adaptive = new AdaptiveEngine(store, undefined, adaptiveRuntime.executor(), adaptiveRuntime.planner(), adaptiveRuntime.control());
 adaptive.recover();
+new WorkspaceAccessCoordinator(store).recoverOnControllerRestart("local-controller");
 new McpWriteService(store).recover();
 adaptive.syncPendingMcpWrites();
 let adaptiveBusy = false, adaptivePending = false;
@@ -71,7 +74,10 @@ const optimizationTimer = setInterval(() => {
     console.error("Optimization scheduler error", error);
   }
 }, 30000);
-const server = createApp(store, token, service, dataDir, adaptive, adaptiveRuntime).listen(
+const app = createApp(store, token, service, dataDir, adaptive, adaptiveRuntime);
+const v3Sessions = app.locals.v3Sessions as AgentSessionManager | undefined;
+v3Sessions?.recoverOnRestart();
+const server = app.listen(
   port,
   "127.0.0.1",
   () => {
@@ -86,7 +92,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const)
       clearInterval(optimizationTimer);
       clearInterval(adaptiveTimer);
       adaptive.close();
-      void Promise.all([supervisor.close(), adaptiveRuntime.close()])
+      const stopV3Sessions = v3Sessions
+        ? Promise.all(
+            v3Sessions
+              .listSessions()
+              .filter((s) => s.processState === "running")
+              .map((s) =>
+                v3Sessions.stopSession(s.id, {
+                  expectedSessionRevision: s.revision,
+                }),
+              ),
+          )
+        : Promise.resolve();
+      void Promise.all([supervisor.close(), adaptiveRuntime.close(), stopV3Sessions])
         .then(() => {
           releaseController();
           store.close();

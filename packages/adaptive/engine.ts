@@ -4,12 +4,30 @@ import { captureArtifactDigests, verifyArtifacts } from "./artifacts.js";
 import { workspaceDigest } from "../workspace/index.js";
 import { z } from "zod";
 import { Store } from "../persistence/index.js";
-import { DomainError, digest, type Task } from "../domain/index.js";
+import { DomainError, digest, type Project, type Task } from "../domain/index.js";
 import { AssetService, checkSchema, type Capability, type Profile } from "./assets.js";
 import { ExternalSkillService } from "../external-skills/index.js";
 import { McpRegistry } from "./mcp.js";
 import type { WriteIntent } from "./mcp-write.js";
 import { selectCoreAgent, type AgentBackend } from "./agent-selection.js";
+import { ContextAssembler } from "../context/assembler.js";
+import { KnowledgeCurationService } from "../context/knowledge-governance.js";
+import {
+  assertEffectsSafeOnReplan,
+  nodeActionKeyForSpec,
+  persistValidityRecords,
+} from "../graph/impact.js";
+import {
+  getValueAtPointer,
+  semanticDigest,
+  type AgentSession,
+  type EffectRecord,
+  type InterventionRecord,
+  type NodeSpec,
+  type ResolvedContextManifest,
+  type ResourceManifest,
+  type ResultValidity,
+} from "../graph/types.js";
 
 const nodeId = z.string().regex(/^[a-z][a-z0-9_-]{0,49}$/);
 export const PlanNodeInput = z.object({
@@ -51,6 +69,15 @@ export type AdaptiveRun = {
   failures: Record<string, string>; decisions: Record<string, Decision>; revisionCount: number;
   diagnosisSnapshot?: ReturnType<DiagnosisService["snapshot"]>;
   createdAt: string; updatedAt: string; budgetUsd?: number | null;
+  schemaVersion?: number;
+  compilerVersion?: string;
+  contextMode?: "contract-v3" | "legacy-ancestors";
+  compiledPlanId?: string;
+  draftId?: string;
+  nodeSpecs?: NodeSpec[];
+  resourceManifest?: ResourceManifest;
+  dispatchGate?: "open" | "paused" | "intervention" | "change_pending" | "reconciling";
+  resultValidity?: Record<string, ResultValidity["state"]>;
 };
 export const DecisionInput = z.object({
   decision: z.enum(["CONTINUE", "REPLAN", "RETRY", "WAIT_INPUT", "WAIT_APPROVAL", "STOP"]),
@@ -63,6 +90,8 @@ export type CapabilityCall = {
   run: AdaptiveRun; node: Plan["nodes"][number]; capability: Capability;
   profileRef: string | null; input: Record<string, unknown>; invocationId: string;
   task: Task; knowledge: ReturnType<AssetService["retrieveKnowledge"]>;
+  nodeSpec?: NodeSpec;
+  contextManifest?: ResolvedContextManifest;
 };
 export type EvalCall = {
   run: AdaptiveRun; checkpoint: Plan["observations"][number]; task: Task;
@@ -89,6 +118,10 @@ export class AdaptiveEngine {
   private wake?: () => void;
   setWake(handler: () => void) { this.wake = handler; }
   private notify() { this.wake?.(); }
+  triggerWake() {
+    if (this.wake) this.wake();
+    else if (this.executor) setImmediate(() => void this.tick());
+  }
   constructor(public store: Store, public assets = new AssetService(store),
     public executor?: Executor, public planner?: Planner, public control?: RuntimeControl) {}
   private assertTaskReady(task: Task, accepting = false) {
@@ -412,16 +445,43 @@ export class AdaptiveEngine {
     return this.store.transaction(() => {
       const run = this.get(runId);
       let changed = false;
+      const keyBySpecId = new Map<string, string>();
+      for (const spec of run.nodeSpecs ?? []) {
+        keyBySpecId.set(spec.id, spec.engineKey);
+        keyBySpecId.set(spec.engineKey, spec.engineKey);
+      }
       for (const node of candidates) {
         if (run.nodeStates[node.id] !== "pending" || !this.dependenciesSettled(run, node)) continue;
-        const unavailable = Object.values(node.bindings).some((binding) =>
-          run.nodeStates[binding.fromNode] === "skipped");
-        const result = node.condition
-          ? run.results[node.condition.fromNode]?.output as Record<string, unknown> | undefined : undefined;
-        const mismatch = node.condition && (
-          run.nodeStates[node.condition.fromNode] === "skipped" ||
-          !result || result[node.condition.field] !== node.condition.equals
-        );
+        const spec = run.nodeSpecs?.find((s) => s.engineKey === node.id || s.id === node.id);
+        let unavailable = false;
+        let mismatch = false;
+        if (spec) {
+          unavailable = spec.bindings.some((binding) => {
+            const upstreamKey = keyBySpecId.get(binding.source.nodeId) ?? binding.source.nodeId;
+            return (
+              run.nodeStates[upstreamKey] === "skipped" &&
+              binding.required &&
+              binding.missing === "block"
+            );
+          });
+          if (spec.condition) {
+            const condKey = keyBySpecId.get(spec.condition.fromNode) ?? spec.condition.fromNode;
+            const lookup = getValueAtPointer(run.results[condKey]?.output, spec.condition.pointer);
+            mismatch =
+              run.nodeStates[condKey] === "skipped" ||
+              !lookup.found ||
+              lookup.value !== spec.condition.equals;
+          }
+        } else {
+          unavailable = Object.values(node.bindings).some((binding) =>
+            run.nodeStates[binding.fromNode] === "skipped");
+          const result = node.condition
+            ? run.results[node.condition.fromNode]?.output as Record<string, unknown> | undefined : undefined;
+          mismatch = Boolean(node.condition && (
+            run.nodeStates[node.condition.fromNode] === "skipped" ||
+            !result || result[node.condition.field] !== node.condition.equals
+          ));
+        }
         if (!unavailable && !mismatch) continue;
         run.nodeStates[node.id] = "skipped";
         this.store.event(runId, "adaptive.node.skipped", {
@@ -437,11 +497,12 @@ export class AdaptiveEngine {
   async tick(): Promise<void> {
     if (this.stopping) return;
     const jobs = this.store.list<AdaptiveRun>("adaptive_run")
-      .filter((r) => !this.busy.has(r.id) && ["queued", "running"].includes(r.status));
+      .filter((r) => !this.busy.has(r.id) && ["queued", "running"].includes(r.status) && (!r.dispatchGate || r.dispatchGate === "open"));
     await Promise.all(jobs.map(async (snapshot) => {
       this.busy.add(snapshot.id);
       try {
         let run = this.get(snapshot.id);
+        if (run.dispatchGate && run.dispatchGate !== "open") return;
         const task = this.store.get<Task>("task", run.taskId);
         const expiresAt = Date.parse(run.createdAt) + (task?.maxMinutes ?? 30) * 60_000;
         if (Date.now() > expiresAt) {
@@ -479,7 +540,16 @@ export class AdaptiveEngine {
         const settled = run.plan.nodes.every((n) => ["succeeded", "skipped"].includes(run.nodeStates[n.id]));
         const observationsDone = run.plan.observations.every((o) =>
           !["pending", "running", "waiting"].includes(run.observationStates[o.id] ?? ""));
-        if (settled && observationsDone) {
+        const hasInvalidResults = run.plan.nodes.some((n) =>
+          ["stale", "invalid"].includes(run.resultValidity?.[n.id] ?? "unknown") &&
+          run.nodeStates[n.id] === "succeeded");
+        const hasUncertainEffects = this.store.list<EffectRecord>("effect_record")
+          .some((e) => e.runId === run.id && e.state === "uncertain");
+        const hasPendingIntervention = this.store.list<InterventionRecord>("intervention")
+          .some((iv) => iv.runId === run.id && iv.reviewState === "pending");
+        const hasLiveSession = this.store.list<AgentSession>("agent_session")
+          .some((s) => s.runId === run.id && ["creating", "running", "stop-unconfirmed"].includes(s.processState));
+        if (settled && observationsDone && !hasInvalidResults && !hasUncertainEffects && !hasPendingIntervention && !hasLiveSession) {
           this.store.transaction(() => {
             const current = this.get(run.id);
             current.status = "awaiting_acceptance"; this.save(current);
@@ -502,6 +572,7 @@ export class AdaptiveEngine {
         // Avoid idle wakeup spinning: only notify if there is immediately ready work.
         const current = this.get(snapshot.id);
         if (["queued","running"].includes(current.status) &&
+            (!current.dispatchGate || current.dispatchGate === "open") &&
             (this.ready(current).length > 0 ||
               current.plan.observations.some((o) => current.observationStates[o.id] === "pending") ||
               current.plan.nodes.every((n) => ["succeeded", "skipped"].includes(current.nodeStates[n.id]))))
@@ -512,29 +583,92 @@ export class AdaptiveEngine {
   private async executeNode(id: string, nodeId: string) {
     const prepared = this.store.transaction(() => {
       const run = this.get(id), node = run.plan.nodes.find((n) => n.id === nodeId)!;
-      if (!["queued","running"].includes(run.status) || run.stopRequested || run.nodeStates[nodeId] !== "pending") return null;
-      const input = this.input(run, node);
+      if (!["queued","running"].includes(run.status) || (run.dispatchGate && run.dispatchGate !== "open") || run.stopRequested || run.nodeStates[nodeId] !== "pending") return null;
       const cap = run.snapshots[nodeId].capability;
       const invocationId = randomUUID();
       const profileRef = run.snapshots[nodeId].profileRef;
-      // Snapshot knowledge hits at invocation time, then reuse those exact hits in the invocation record.
       const task = this.store.get<Task>("task", run.taskId)!;
-      const knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, cap.name);
+      const nodeSpec = run.nodeSpecs?.find((s) => s.engineKey === nodeId || s.id === nodeId);
+      const isV3 = (run.schemaVersion ?? 0) >= 3 || run.contextMode === "contract-v3";
+
+      let input: Record<string, unknown>;
+      let knowledge: ReturnType<AssetService["retrieveKnowledge"]>;
+      let contextManifest: ResolvedContextManifest | undefined;
+
+      if (isV3) {
+        const ws = this.store.get<{ path: string }>("adaptive_workspace", id);
+        const project = task.projectId ? this.store.get<Project>("project", task.projectId) : undefined;
+        const wsDir = ws?.path ?? project?.repositoryPath ?? process.cwd();
+        let wsDig = "";
+        try { wsDig = workspaceDigest(wsDir); } catch { wsDig = ""; }
+        try {
+          const assembled = new ContextAssembler(this.store).assemble({
+            run,
+            node,
+            nodeSpec,
+            capability: cap,
+            profileRef,
+            profile: run.snapshots[nodeId].profile,
+            skillInstructions: run.snapshots[nodeId].skillInstructions,
+            task,
+            invocationId,
+            workspaceDir: wsDir,
+            workspaceDigest: wsDig,
+          });
+          input = assembled.resolvedInputs;
+          knowledge = assembled.knowledge;
+          contextManifest = assembled.manifest;
+        } catch (err) {
+          const code = err instanceof DomainError ? err.code : "context_assembly_failed";
+          const message = err instanceof Error ? err.message : String(err);
+          run.nodeStates[nodeId] = "failed";
+          run.failures[nodeId] = message;
+          run.resultValidity = { ...(run.resultValidity ?? {}), [nodeId]: "invalid" };
+          this.save(run);
+          persistValidityRecords(this.store, run, { [nodeId]: "invalid" }, { [nodeId]: [code, message] });
+          this.store.event(id, "context.blocked", {
+            nodeId, invocationId, code, message,
+          }, "platform", { planRevision: run.planRevision });
+          return null;
+        }
+      } else {
+        input = this.input(run, node);
+        knowledge = this.assets.retrieveKnowledge(task.objective, task.projectId, task.id, cap.name);
+      }
+
       this.store.put("adaptive_invocation", {
         id: invocationId, runId: id, planRevision: run.planRevision,
         nodeId, profileRef, inputDigest: digest(input), knowledgeRefs: knowledge.map((k) => ({ id:k.id, digest:k.digest })),
+        ...(contextManifest ? { contextManifestId: contextManifest.id } : {}),
         status: "running", startedAt: new Date().toISOString(),
       });
-      if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write")
+      if (cap.sideEffect === "workspace-write" || cap.sideEffect === "external-write") {
+        const now = new Date().toISOString();
         this.store.put("adaptive_side_effect", {
           id: invocationId, runId: id, nodeId, capabilityRef: cap.id,
           inputDigest: digest(input),
           state: cap.sideEffect === "external-write" ? "awaiting_approval" : "started",
-          createdAt: new Date().toISOString(),
+          createdAt: now,
         });
+        const effRecord: EffectRecord = {
+          id: `${id}:${invocationId}`,
+          runId: id,
+          nodeId,
+          invocationId,
+          actionKey: nodeSpec ? nodeActionKeyForSpec(nodeSpec, cap.sideEffect) : `${cap.id}:${nodeId}:${cap.sideEffect}`,
+          capabilityRef: cap.id,
+          sideEffect: cap.sideEffect,
+          targetDigest: run.projectDigest ?? "",
+          argsDigest: semanticDigest(input),
+          state: cap.sideEffect === "external-write" ? "planned" : "started",
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.store.put("effect_record", effRecord);
+      }
       run.nodeStates[nodeId] = "running"; run.status = "running"; this.save(run);
-      this.store.event(id, "adaptive.invocation.started", { invocationId, nodeId, profileRef, inputDigest: digest(input) });
-      return { run, node, capability: cap, profileRef, input, invocationId, task, knowledge };
+      this.store.event(id, "adaptive.invocation.started", { invocationId, nodeId, profileRef, inputDigest: digest(input), ...(contextManifest ? { contextManifestId: contextManifest.id } : {}) }, "platform", { planRevision: run.planRevision });
+      return { run, node, capability: cap, profileRef, input, invocationId, task, knowledge, nodeSpec, contextManifest };
     });
     if (!prepared) return;
     const profile = this.assets.getProfile(prepared.profileRef!);
@@ -591,47 +725,93 @@ export class AdaptiveEngine {
       this.store.transaction(() => {
         const run = this.get(id);
         if (run.nodeStates[nodeId] !== "running") return;
+        if (prepared.nodeSpec?.knowledgeOutputs?.length) {
+          new KnowledgeCurationService(this.store).recordNodeKnowledgeOutputs(
+            run,
+            nodeId,
+            prepared.invocationId,
+            prepared.nodeSpec.knowledgeOutputs,
+            response.output,
+          );
+        }
+        const now = new Date().toISOString();
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
         this.store.put("adaptive_invocation", { ...record, status: "succeeded",
-          finishedAt: new Date().toISOString(),
+          finishedAt: now,
           durationMs: Date.now() - Date.parse(record.startedAt),
           modelUsage: response.modelUsage ?? null,
           outputDigest: digest(response.output) });
         const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
         if (effect) this.store.put("adaptive_side_effect", {
           ...effect, state: "confirmed", outputDigest: digest(response.output),
-          confirmedAt: new Date().toISOString(),
+          confirmedAt: now,
         });
+        const v3Effect = this.store.get<EffectRecord>("effect_record", `${id}:${prepared.invocationId}`);
+        if (v3Effect) {
+          this.store.put("effect_record", {
+            ...v3Effect,
+            state: "confirmed",
+            receiptRef: prepared.invocationId,
+            targetDigest: digest(response.output),
+            updatedAt: now,
+          });
+        }
         if(diagnosisReport) {
           const report=new DiagnosisService(this.store).reportFromSnapshot(run.taskId,diagnosisReport,run.diagnosisSnapshot!,id,nodeId);
           this.store.event(id,"adaptive.diagnosis.reported",{reportId:report.id,inputDigest:report.inputDigest,conclusion:report.conclusion.status});
         }
         run.results[nodeId] = { output: response.output, artifactRefs: response.artifacts ?? [], artifactDigests: captureArtifactDigests(response.artifacts ?? []), invocationId: prepared.invocationId, digest: digest(response.output) };
-        run.nodeStates[nodeId] = "succeeded"; this.activateObservations(run, nodeId, "succeeded");
-        this.save(run); this.store.event(id, "adaptive.invocation.completed", { nodeId, invocationId: prepared.invocationId, outputDigest: digest(response.output) });
+        run.nodeStates[nodeId] = "succeeded";
+        run.resultValidity = { ...(run.resultValidity ?? {}), [nodeId]: "valid" };
+        this.activateObservations(run, nodeId, "succeeded");
+        this.save(run);
+        persistValidityRecords(this.store, run, { [nodeId]: "valid" }, { [nodeId]: [] });
+        this.store.event(id, "adaptive.invocation.completed", { nodeId, invocationId: prepared.invocationId, outputDigest: digest(response.output) }, "platform", { planRevision: run.planRevision });
       });
     } catch (error) {
       this.store.transaction(() => {
         const run = this.get(id);
         if (run.nodeStates[nodeId] !== "running") return;
+        const now = new Date().toISOString();
         const record = this.store.get<any>("adaptive_invocation", prepared.invocationId)!;
         const message = String((error as Error).message).slice(0, 2000);
         const effect = this.store.get<any>("adaptive_side_effect", prepared.invocationId);
-        const uncertain = !!effect && effect.state !== "awaiting_approval";
+        const uncertain =
+          Boolean((error as { uncertain?: boolean } | null)?.uncertain) ||
+          (!!effect && effect.state !== "awaiting_approval");
         this.store.put("adaptive_invocation", { ...record, status: uncertain ? "uncertain" : "failed",
-          finishedAt: new Date().toISOString(),
+          finishedAt: now,
           durationMs: Date.now() - Date.parse(record.startedAt), error: message });
         if (effect) this.store.put("adaptive_side_effect", {
           ...effect, state: uncertain ? "uncertain" : "not_executed",
-          reason:message,at:new Date().toISOString(),
+          reason:message,at:now,
         });
+        const v3Effect = this.store.get<EffectRecord>("effect_record", `${id}:${prepared.invocationId}`);
+        if (v3Effect) {
+          this.store.put("effect_record", {
+            ...v3Effect,
+            state: uncertain ? "uncertain" : "reconciled",
+            reason: message,
+            updatedAt: now,
+          });
+        }
         run.nodeStates[nodeId] = uncertain ? "uncertain" : "failed";
         run.failures[nodeId] = message;
-        if (uncertain) run.status = "reconciling";
+        run.resultValidity = { ...(run.resultValidity ?? {}), [nodeId]: uncertain ? "unknown" : "invalid" };
+        if (uncertain) {
+          run.status = "reconciling";
+          run.dispatchGate = "reconciling";
+        }
         else this.activateObservations(run, nodeId, "failed");
         this.save(run);
+        persistValidityRecords(
+          this.store,
+          run,
+          { [nodeId]: uncertain ? "unknown" : "invalid" },
+          { [nodeId]: [message] },
+        );
         this.store.event(id, uncertain ? "adaptive.side_effect.uncertain" : "adaptive.invocation.failed",
-          { nodeId, invocationId: prepared.invocationId, message });
+          { nodeId, invocationId: prepared.invocationId, message }, "platform", { planRevision: run.planRevision });
       });
     }
   }
@@ -668,11 +848,23 @@ export class AdaptiveEngine {
           ...effect,state:"confirmed",outputDigest:intent.resultDigest,
           confirmedAt:new Date().toISOString(),
         });
+        const effRec = this.store.get<EffectRecord>("effect_record", `${current.id}:${record.id}`);
+        if (effRec) {
+          this.store.put("effect_record", {
+            ...effRec,
+            state: "confirmed",
+            receiptRef: intent.id,
+            targetDigest: intent.resultDigest ?? effRec.targetDigest,
+            updatedAt: new Date().toISOString(),
+          });
+        }
         current.results[id]={
           output,artifactRefs:[],invocationId:record.id,digest:digest(output),
         };
         current.nodeStates[id]="succeeded";
+        current.resultValidity = { ...(current.resultValidity ?? {}), [id]: "valid" };
         current.status="running";
+        persistValidityRecords(this.store, current, { [id]: "valid" }, { [id]: [] });
         this.activateObservations(current,id,"succeeded");
         this.store.event(current.id,"adaptive.mcp.approval_completed",{
           nodeId:id,invocationId:record.id,intentId:intent.id,
@@ -682,6 +874,8 @@ export class AdaptiveEngine {
         const uncertain=intent.status==="uncertain"||intent.status==="reconciled";
         current.nodeStates[id]=uncertain?"uncertain":"failed";
         current.status=uncertain?"reconciling":"failed";
+        if (uncertain) current.dispatchGate = "reconciling";
+        current.resultValidity = { ...(current.resultValidity ?? {}), [id]: uncertain ? "unknown" : "invalid" };
         const reason=uncertain
           ? "MCP 写操作结果不确定，或仅有人工核对记录；不得自动继续 DAG"
           : "MCP 写操作审批已拒绝";
@@ -694,6 +888,21 @@ export class AdaptiveEngine {
           ...effect,state:uncertain?"uncertain":"not_executed",
           reason,at:new Date().toISOString(),
         });
+        const effRec = this.store.get<EffectRecord>("effect_record", `${current.id}:${record.id}`);
+        if (effRec) {
+          this.store.put("effect_record", {
+            ...effRec,
+            state: uncertain ? "uncertain" : "reconciled",
+            reason,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        persistValidityRecords(
+          this.store,
+          current,
+          { [id]: uncertain ? "unknown" : "invalid" },
+          { [id]: [reason] },
+        );
         if(!uncertain)this.setTaskStatus(current.taskId,"planned");
         this.store.event(current.id,uncertain?"adaptive.mcp.uncertain":"adaptive.mcp.rejected",{
           nodeId:id,invocationId:record.id,intentId:intent.id,
@@ -838,6 +1047,7 @@ export class AdaptiveEngine {
       }
       // A completed write has already changed the worktree or an external system. It cannot disappear or be replayed
       // merely because the planner changed the upstream plan. Require a new downstream write node.
+      assertEffectsSafeOnReplan(this.store, run, plan.nodes.map((n) => n.id));
       for (const [oldId, oldState] of Object.entries(run.nodeStates)) {
         if (oldState !== "succeeded" ||
             !["workspace-write", "external-write"].includes(run.snapshots[oldId]?.capability.sideEffect ?? "")) continue;
@@ -962,6 +1172,9 @@ export class AdaptiveEngine {
         } else if(run.stopRequested === "pause" && !writesHaveFailed) {
           run.status="paused";run.workspaceCheckpoint=this.inspectWorkspace(id).digest??undefined;
         }
+        if (run.dispatchGate === "reconciling") {
+          run.dispatchGate = writesHaveFailed ? "paused" : "open";
+        }
       }
       this.save(run);
       for (const invocation of this.store.list<any>("adaptive_invocation").filter((x) =>
@@ -971,6 +1184,15 @@ export class AdaptiveEngine {
         if (effect) this.store.put("adaptive_side_effect", {
           ...effect, state: "reconciled", note, confirmedStopped: stoppedConfirmed, at: new Date().toISOString(),
         });
+        const effRec = this.store.get<EffectRecord>("effect_record", `${id}:${invocation.id}`);
+        if (effRec) {
+          this.store.put("effect_record", {
+            ...effRec,
+            state: "reconciled",
+            reason: note,
+            updatedAt: new Date().toISOString(),
+          });
+        }
       }
       this.store.event(id, "adaptive.recovery.reconciled",
         { nodeId, stoppedConfirmed, note, sideEffect: cap.sideEffect }, "user");
@@ -1054,6 +1276,9 @@ export class AdaptiveEngine {
         run.nodeStates[node]="pending";delete run.failures[node];
       }
       delete run.stopRequested;
+      if (run.dispatchGate === "paused" || run.dispatchGate === "reconciling") {
+        run.dispatchGate = "open";
+      }
       run.status=Object.values(run.nodeStates).includes("waiting") ||
         Object.values(run.observationStates).includes("waiting") ? "waiting":"running";
       this.control?.resume(id);this.save(run);this.notify();
@@ -1099,7 +1324,7 @@ export class AdaptiveEngine {
       this.store.put("adaptive_plan_revision",{id:id+":"+run.planRevision,runId:id,number:run.planRevision,
         plan:run.plan,states:this.get(id).nodeStates,results:this.get(id).results,reason:"Before user workspace adoption"});
       run.planRevision++;run.revisionCount++;run.observationStates={};run.decisions={};run.failures={};
-      delete run.stopRequested;run.status="running";run.workspaceCheckpoint=expectedDigest;
+      delete run.stopRequested;run.status="running";run.dispatchGate="open";run.workspaceCheckpoint=expectedDigest;
       this.store.put("adaptive_workspace",{...workspace,setupState:"complete"});
       this.store.put("task",{...task,status:"in_progress",updatedAt:new Date().toISOString()});
       this.store.put("adaptive_plan_revision",{id:id+":"+run.planRevision,runId:id,number:run.planRevision,

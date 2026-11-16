@@ -1,5 +1,14 @@
 export type Point = { x: number; y: number };
-export type CanvasLayout = { id: string; revision: number; positions: Record<string, Point> };
+export type CanvasViewport = { x: number; y: number; zoom: number };
+export type CanvasLayout = {
+  id: string;
+  graphId?: string;
+  viewerKey?: string;
+  revision: number;
+  positions: Record<string, Point>;
+  viewport?: CanvasViewport;
+  collapsedGroups?: string[];
+};
 /** Stable layered layout; independent of execution state. Observations are ordinary presentation vertices. */
 export function defaultPositions(nodes: {id: string}[], edges: {source: string; target: string}[]): Record<string, Point> {
   const ids = new Set(nodes.map(n => n.id));

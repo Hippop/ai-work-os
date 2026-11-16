@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { Task, Project } from "../../../packages/domain/index";
 import { McpWriteBoard } from "./McpWriteBoard";
 import { CapabilityBuilderBoard } from "./CapabilityBuilderBoard";
-type API = (path: string, data?: unknown, headers?: Record<string, string>) => Promise<any>;
+type API = (path: string, data?: unknown, headers?: Record<string, string>, method?: string) => Promise<any>;
 type Item = { id: string; name: string; version: string; title?: string; description?: string; status: string; profileRef?: string | null; sourceSkillId?: string | null };
 type Knowledge = Item & { content: string; scope: string; source: string };
 type Binding = {id:string;capabilityName:string;knowledgeRef:string;mode:string;status?:string};
@@ -123,18 +123,36 @@ export function AdaptiveBoard({ api, act, token, tasks, projects, initialRunId =
       {notice && <p role="status">{notice}</p>}
     </div>
     <div className="panel">
-      <h2>任务运行画布</h2>
+      <h2>任务运行画布（Canvas V3.1 统一工作台）</h2>
       <label>选择任务运行<select value={selectedRun} onChange={e=>setSelectedRun(e.target.value)}>
-        <option value="">请选择已有运行</option>
+        <option value="">（新建方案草稿 / 请选择已有运行）</option>
         {runs.map(r=><option key={r.id} value={r.id}>{tasks.find(t=>t.id===r.taskId)?.title ?? r.taskId} · {r.status}</option>)}
       </select></label>
-      {selectedRun ? <RunCanvas key={selectedRun} runId={selectedRun} api={api} onInspect={node=>{
-        const target=document.getElementById(`run-detail-${node.kind}-${node.sourceId}`);
-        target?.scrollIntoView({behavior:"smooth",block:"center"});target?.focus({preventScroll:true});
-      }}/> : <p>创建并下发任务后，在这里查看流程、节点状态和知识引用。</p>}
+      <RunCanvas
+        key={selectedRun || "draft-mode"}
+        runId={selectedRun}
+        api={api}
+        tasks={tasks}
+        capabilities={caps}
+        profiles={profiles}
+        onRunStarted={(newRunId) => {
+          setSelectedRun(newRunId);
+          void load();
+        }}
+        onResolveGap={() => {
+          document.getElementById("capability-builder-anchor")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+        onChanged={load}
+        onInspect={node=>{
+          const target=document.getElementById(`run-detail-${node.kind}-${node.sourceId}`);
+          target?.scrollIntoView({behavior:"smooth",block:"center"});target?.focus({preventScroll:true});
+        }}
+      />
     </div>
-    <CapabilityBuilderBoard api={api} act={act} projects={projects}
-      skills={skills} knowledge={knowledge} profiles={profiles} onChanged={load}/>
+    <div id="capability-builder-anchor">
+      <CapabilityBuilderBoard api={api} act={act} projects={projects}
+        skills={skills} knowledge={knowledge} profiles={profiles} onChanged={load}/>
+    </div>
     <div className="panel">
       <h2>Skill 导入与智能转化</h2>
       <form onSubmit={(e) => doForm(e, async (f) => {
